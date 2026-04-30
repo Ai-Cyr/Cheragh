@@ -1,0 +1,29 @@
+ingestion:
+  path: ./docs
+  chunk_size: 800
+  chunk_overlap: 120
+  recursive: true
+
+embedding:
+  provider: hashing
+  dimension: 384
+
+retriever:
+  type: memory
+  top_k: 5
+
+compression:
+  enabled: true
+  type: default
+
+query:
+  enabled: true
+  type: multi-query
+
+generation:
+  provider: extractive
+
+strict_grounding: true
+require_citations: false
+flag_unsourced_sentences: false
+trace_enabled: true

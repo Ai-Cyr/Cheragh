@@ -1,0 +1,61 @@
+ingestion:
+  path: ./docs
+  recursive: true
+  chunk_size: 900
+  chunk_overlap: 150
+  max_file_size_mb: 50
+  exclude_patterns:
+    - ".git/**"
+    - ".venv/**"
+    - "node_modules/**"
+    - "dist/**"
+    - "build/**"
+
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+
+retriever:
+  type: hybrid
+  top_k: 6
+  alpha: 0.55
+  filters: {}
+  tokenizer:
+    strip_accents: true
+    keep_hyphenated: true
+    ngram_range: [1, 2]
+    use_default_stopwords: true
+
+reranker:
+  enabled: true
+  provider: keyword
+  first_stage_top_k: 40
+
+compression:
+  enabled: true
+  type: default
+
+query:
+  enabled: true
+  type: multi-query
+
+generation:
+  provider: openai
+  model: gpt-4o-mini
+
+strict_grounding: true
+require_citations: true
+flag_unsourced_sentences: true
+trace_enabled: true
+min_score: 0.03
+
+cache:
+  enabled: true
+  backend: sqlite
+  path: .cheragh/cache.sqlite
+  serializer: json
+  ttl: 3600
+  cache_embeddings: true
+  cache_retrieval: true
+  cache_reranking: true
+  cache_llm: true

@@ -1,0 +1,31 @@
+ingestion:
+  path: ./docs
+  recursive: true
+  chunk_size: 700
+  chunk_overlap: 120
+
+embedding:
+  provider: hashing
+  dimension: 384
+
+retriever:
+  type: hybrid
+  top_k: 5
+  alpha: 0.4
+  tokenizer:
+    strip_accents: true
+    keep_hyphenated: true
+    ngram_range: [1, 2]
+    use_default_stopwords: true
+
+reranker:
+  enabled: true
+  provider: keyword
+  first_stage_top_k: 25
+
+generation:
+  provider: extractive
+
+strict_grounding: true
+require_citations: false
+trace_enabled: true

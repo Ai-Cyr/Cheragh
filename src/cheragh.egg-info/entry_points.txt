@@ -1,0 +1,2 @@
+[console_scripts]
+cheragh = cheragh.cli.main:cli_entrypoint

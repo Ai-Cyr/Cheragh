@@ -1,0 +1,27 @@
+services:
+  cheragh:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: python:3.12.7-slim-bookworm
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      CHERAGH_INDEX: /data/.cheragh_index
+      CHERAGH_INDEX_ROOT: /data
+      CHERAGH_ENABLE_INDEXING: "false"
+    depends_on:
+      qdrant:
+        condition: service_started
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  qdrant_storage:

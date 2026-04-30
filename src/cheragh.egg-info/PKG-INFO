@@ -1,0 +1,611 @@
+Metadata-Version: 2.4
+Name: cheragh
+Version: 1.0.0
+Summary: Composable RAG toolkit for standard Python applications
+Author: RAG Toolkit Maintainers
+License: MIT
+Keywords: rag,retrieval,llm,embeddings,information-retrieval
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.24
+Requires-Dist: pydantic>=2
+Provides-Extra: local
+Requires-Dist: sentence-transformers>=2.2; extra == "local"
+Provides-Extra: openai
+Requires-Dist: openai>=1.0; extra == "openai"
+Provides-Extra: cohere
+Requires-Dist: cohere>=5.0; extra == "cohere"
+Provides-Extra: voyage
+Requires-Dist: voyageai>=0.2; extra == "voyage"
+Provides-Extra: anthropic
+Requires-Dist: anthropic>=0.25; extra == "anthropic"
+Provides-Extra: litellm
+Requires-Dist: litellm>=1.0; extra == "litellm"
+Provides-Extra: rerank
+Requires-Dist: sentence-transformers>=2.2; extra == "rerank"
+Provides-Extra: raptor
+Requires-Dist: scikit-learn>=1.0; extra == "raptor"
+Provides-Extra: bm25
+Requires-Dist: rank-bm25>=0.2.2; extra == "bm25"
+Provides-Extra: config
+Requires-Dist: PyYAML>=6.0; extra == "config"
+Requires-Dist: pydantic>=2; extra == "config"
+Provides-Extra: pdf
+Requires-Dist: pypdf>=4.0; extra == "pdf"
+Provides-Extra: docx
+Requires-Dist: python-docx>=1.0; extra == "docx"
+Provides-Extra: faiss
+Requires-Dist: faiss-cpu>=1.7; extra == "faiss"
+Provides-Extra: chroma
+Requires-Dist: chromadb>=0.5; extra == "chroma"
+Provides-Extra: qdrant
+Requires-Dist: qdrant-client>=1.9; extra == "qdrant"
+Provides-Extra: fastapi
+Requires-Dist: fastapi>=0.110; extra == "fastapi"
+Requires-Dist: uvicorn>=0.29; extra == "fastapi"
+Requires-Dist: pydantic>=2; extra == "fastapi"
+Provides-Extra: redis
+Requires-Dist: redis>=5.0; extra == "redis"
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: build; extra == "dev"
+Requires-Dist: twine; extra == "dev"
+Requires-Dist: PyYAML>=6.0; extra == "dev"
+Provides-Extra: all
+Requires-Dist: sentence-transformers>=2.2; extra == "all"
+Requires-Dist: openai>=1.0; extra == "all"
+Requires-Dist: cohere>=5.0; extra == "all"
+Requires-Dist: voyageai>=0.2; extra == "all"
+Requires-Dist: anthropic>=0.25; extra == "all"
+Requires-Dist: litellm>=1.0; extra == "all"
+Requires-Dist: scikit-learn>=1.0; extra == "all"
+Requires-Dist: rank-bm25>=0.2.2; extra == "all"
+Requires-Dist: PyYAML>=6.0; extra == "all"
+Requires-Dist: pydantic>=2; extra == "all"
+Requires-Dist: pypdf>=4.0; extra == "all"
+Requires-Dist: python-docx>=1.0; extra == "all"
+Requires-Dist: faiss-cpu>=1.7; extra == "all"
+Requires-Dist: chromadb>=0.5; extra == "all"
+Requires-Dist: qdrant-client>=1.9; extra == "all"
+Requires-Dist: fastapi>=0.110; extra == "all"
+Requires-Dist: uvicorn>=0.29; extra == "all"
+Requires-Dist: redis>=5.0; extra == "all"
+Dynamic: license-file
+
+# Cheragh — package Python standard
+
+Package Python autonome pour construire des pipelines RAG composables : ingestion, chunking, index vectoriel local, retrieval hybride, transformations de requête, évaluation, CLI et génération avec LLM injectable.
+
+Le package ne dépend pas de Dataiku. Les intégrations externes — OpenAI, sentence-transformers, PDF, DOCX — sont optionnelles.
+
+## Installation
+
+Depuis ce dossier :
+
+```bash
+pip install -e .
+```
+
+Installation minimale : `numpy` + `pydantic` pour la validation de configuration. Le retriever hybride fonctionne même sans `rank-bm25` grâce à un fallback BM25 interne.
+
+Extras utiles :
+
+```bash
+pip install -e '.[local]'          # SentenceTransformerEmbedding + reranking local
+pip install -e '.[openai]'         # OpenAILLMClient
+pip install -e '.[config]'         # YAML via PyYAML + validation Pydantic
+pip install -e '.[pdf]'            # ingestion PDF via pypdf
+pip install -e '.[docx]'           # ingestion DOCX via python-docx
+pip install -e '.[all]'            # intégrations principales
+```
+
+## Quickstart Python
+
+```python
+from cheragh import RAGEngine, HashingEmbedding, StaticLLMClient, Document
+
+texts = [
+    Document("Le RAG combine recherche documentaire et génération.", doc_id="rag"),
+    Document("Un package Python moderne utilise pyproject.toml.", doc_id="python"),
+]
+
+engine = RAGEngine.from_documents(
+    texts,
+    embedding_model=HashingEmbedding(dimension=128),
+    llm_client=StaticLLMClient("Réponse contrôlée. [source: rag]"),
+    top_k=3,
+)
+
+response = engine.ask("Qu'est-ce que le RAG ?")
+print(response.answer)
+print(response.sources)
+```
+
+## Ingestion + chunking
+
+```python
+from cheragh import load_documents, chunk_documents
+
+raw_docs = load_documents("./docs")
+chunks = chunk_documents(raw_docs, chunk_size=800, chunk_overlap=120)
+```
+
+Formats supportés sans dépendances lourdes : `.txt`, `.md`, `.rst`, `.csv`, `.json`, `.jsonl`, `.yaml`, `.xml`, `.html`.
+
+Formats optionnels :
+
+- PDF avec `cheragh[pdf]`
+- DOCX avec `cheragh[docx]`
+
+## Vector store local
+
+```python
+from cheragh import MemoryVectorStore, HashingEmbedding
+
+store = MemoryVectorStore(HashingEmbedding())
+store.add_documents(chunks)
+store.save("./index")
+
+loaded = MemoryVectorStore.load("./index", HashingEmbedding())
+retriever = loaded.as_retriever(filters={"department": "legal"})
+```
+
+Le format persistant est lisible :
+
+```text
+index/
+├── manifest.json
+├── documents.jsonl
+└── embeddings.npy
+```
+
+## API haut niveau `RAGEngine`
+
+```python
+from cheragh import RAGEngine, HashingEmbedding, OpenAILLMClient
+
+engine = RAGEngine.from_path(
+    "./docs",
+    embedding_model=HashingEmbedding(dimension=384),
+    llm_client=OpenAILLMClient(model="gpt-4o-mini"),
+    retriever_type="hybrid",
+    alpha=0.45,
+    top_k=5,
+    strict_grounding=True,
+)
+
+response = engine.ask("Quelle est la politique de remboursement ?")
+print(response.answer)
+print(response.citations)
+print(response.warnings)
+```
+
+`RAGResponse` contient :
+
+- `answer`
+- `sources`
+- `retrieved_documents`
+- `prompt`
+- `citations`
+- `warnings`
+- `metadata`
+
+## Configuration YAML
+
+```yaml
+ingestion:
+  path: ./docs
+  recursive: true
+  chunk_size: 800
+  chunk_overlap: 120
+
+embedding:
+  provider: hashing
+  dimension: 384
+
+retriever:
+  type: hybrid
+  alpha: 0.45
+  top_k: 5
+
+generation:
+  provider: extractive
+
+strict_grounding: true
+min_score: 0.05
+```
+
+```python
+from cheragh import RAGEngine
+
+engine = RAGEngine.from_config("rag.yaml")
+print(engine.ask("Résume le projet").answer)
+```
+
+## CLI
+
+Indexer un dossier :
+
+```bash
+cheragh index ./docs --output ./index --chunk-size 800 --chunk-overlap 120
+```
+
+Questionner l'index local :
+
+```bash
+cheragh ask "Que dit la documentation sur le RAG ?" --index ./index
+```
+
+Utiliser OpenAI pour la génération :
+
+```bash
+cheragh ask "Que dit la documentation ?" --index ./index --openai-model gpt-4o-mini
+```
+
+Évaluer un retriever avec un JSONL :
+
+```jsonl
+{"query": "packaging python", "expected_doc_ids": ["python"]}
+```
+
+```bash
+cheragh eval evalset.jsonl --index ./index --top-k 5
+```
+
+## Évaluation retrieval
+
+```python
+from cheragh import evaluate_retrieval, RetrievalExample
+
+result = evaluate_retrieval(
+    [RetrievalExample("packaging python", {"python"})],
+    retriever,
+    top_k=5,
+)
+
+print(result.metrics)
+```
+
+Métriques incluses :
+
+- `hit_rate@k`
+- `mrr`
+- `precision@k`
+
+## Techniques RAG incluses
+
+| Couche | Technique | Classe |
+| --- | --- | --- |
+| API | Engine haut niveau | `RAGEngine` |
+| Ingestion | Loaders + chunkers | `load_documents`, `chunk_documents` |
+| Vector store | Store local NumPy | `MemoryVectorStore` |
+| Retrieval | Hybrid Search | `HybridSearchRetriever` |
+| Retrieval | Cross-Encoder Reranking | `RerankingRetriever` |
+| Retrieval | HyDE | `HyDERetriever` |
+| Retrieval | RAG-Fusion | `RAGFusionRetriever` |
+| Retrieval | Parent Document | `ParentDocumentRetriever` |
+| Query | Self-Query | `SelfQueryRetriever` |
+| Query | Contextual Compression | `ContextualCompressionRetriever` |
+| Query | Query Decomposition | `QueryDecompositionRetriever` |
+| Query | Step-Back | `StepBackRetriever` |
+| Query | MMR | `MMRRetriever` |
+| Orchestration | Corrective RAG / CRAG | `CorrectiveRAGRetriever` |
+| Indexing | Sentence Window | `SentenceWindowRetriever` |
+| Indexing | HyQE | `HyQERetriever` |
+| Indexing | Semantic Chunking | `SemanticChunker` |
+| Orchestration | Router / Ensemble | `QueryRouter`, `EnsembleRetriever` |
+| Hierarchical | RAPTOR | `RAPTORRetriever` |
+| Iterative | FLARE | `FLAREPipeline` |
+| Indexing | Propositional Retrieval | `PropositionalRetriever` |
+| Post-processing | Chain-of-Note | `ChainOfNoteRetriever` |
+| Control | Adaptive Retrieval | `AdaptiveRetriever` |
+
+## Tests
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests
+```
+
+## Structure principale
+
+```text
+cheragh/
+├── pyproject.toml
+├── README.md
+├── examples/
+├── tests/
+└── src/cheragh/
+    ├── base.py
+    ├── engine.py
+    ├── pipeline.py
+    ├── ingestion/
+    ├── vectorstores/
+    ├── evaluation/
+    ├── config/
+    ├── cli/
+    └── ... techniques RAG historiques
+```
+
+## Notes de version 0.2.0
+
+Ajouts majeurs :
+
+- `RAGEngine` et `RAGResponse`
+- ingestion fichiers/dossiers
+- chunkers récursif et token-like
+- vector store local persistant `MemoryVectorStore`
+- configuration YAML/JSON
+- CLI `cheragh`
+- métriques de retrieval
+- `py.typed`
+- extras packaging plus complets
+
+Limitation connue : le cache historique de certains retrievers reste basé sur `pickle` pour compatibilité avec les techniques existantes. Le nouveau `MemoryVectorStore` utilise en revanche un format `JSONL + NPY` plus sûr et inspectable.
+
+## Notes de version 0.3.0
+
+Ajouts majeurs :
+
+- embeddings providers : `OpenAIEmbedding`, `AzureOpenAIEmbedding`, `CohereEmbedding`, `VoyageEmbedding`
+- clients LLM : `OpenAIChatClient`, `AzureOpenAIChatClient`, `AnthropicClient`, `LiteLLMClient`, `OllamaClient`
+- vector stores optionnels : `FaissVectorStore`, `ChromaVectorStore`, `QdrantVectorStore`
+- reranking : `CrossEncoderReranker`, `KeywordOverlapReranker`, `CohereReranker`, `ReciprocalRankFusionReranker`
+- `RAGEngine` peut maintenant brancher un reranker directement via `reranker=...`
+- validation de citations renforcée via `validate_citations(...)`
+- `RAGResponse` expose `grounded_score`, `unsourced_claims` et `citation_validation`
+- exemple FastAPI dans `examples/fastapi_app/`
+
+Extras utiles v0.3 :
+
+```bash
+pip install -e '.[openai]'      # OpenAI/Azure OpenAI embeddings + chat
+pip install -e '.[chroma]'      # ChromaDB
+pip install -e '.[qdrant]'      # Qdrant
+pip install -e '.[faiss]'       # FAISS local
+pip install -e '.[rerank]'      # CrossEncoderReranker
+pip install -e '.[fastapi]'     # exemple API
+```
+
+### Exemple v0.3 : embeddings + Chroma + reranking
+
+```python
+from cheragh import RAGEngine, SentenceTransformerEmbedding
+
+engine = RAGEngine.from_path(
+    "./docs",
+    embedding_model=SentenceTransformerEmbedding("sentence-transformers/all-MiniLM-L6-v2"),
+    retriever_type="chroma",
+    vectorstore_path="./.chroma",
+    collection_name="docs",
+    reranker="cross-encoder",
+    reranker_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+    first_stage_top_k=30,
+    top_k=5,
+    strict_grounding=True,
+    require_citations=True,
+)
+
+response = engine.ask("Quelle est la décision principale du document ?")
+print(response.answer)
+print(response.grounded_score)
+print(response.warnings)
+```
+
+### Exemple v0.3 : YAML production
+
+Voir `examples/rag_v03.yaml` pour une configuration avec ingestion, embeddings, Chroma, reranking et génération OpenAI.
+
+## Notes de version 0.4.0
+
+Ajouts majeurs :
+
+- import racine plus léger avec lazy-loading des techniques expérimentales lourdes
+- trace d'exécution `RAGTrace` dans `RAGResponse.trace`
+- compression de contexte : `ExtractiveContextCompressor`, `RedundancyFilter`, `CompressionPipeline`
+- query transforms : `MultiQueryTransformer`, `StepBackQueryTransformer`
+- chunkers structurés : `MarkdownHeaderChunker`, `HTMLSectionChunker`, `SentenceWindowChunker`
+- loader PDF enrichi avec métadonnées page-level, `page_count`, `file_sha256`, `char_count`
+- indexation incrémentale locale via `index_path(..., incremental=True)`
+- CLI enrichie : `init`, `inspect-index`, `serve`, `index --incremental`
+- serveur FastAPI packagé : `cheragh.server.create_app`
+- évaluation génération : `citation_accuracy`, `groundedness`, `answer_relevance`
+- Dockerfile, docker-compose avec Qdrant et workflow GitHub Actions
+
+### Exemple v0.4 : compression + multi-query + trace
+
+```python
+from cheragh import RAGEngine, HashingEmbedding
+
+engine = RAGEngine.from_path(
+    "./docs",
+    embedding_model=HashingEmbedding(),
+    retriever_type="memory",
+    query_transformer="multi-query",
+    compressor="default",
+    strict_grounding=True,
+)
+
+response = engine.ask("Quelle est la décision principale ?")
+print(response.answer)
+print(response.trace.to_dict())
+```
+
+### Indexation incrémentale
+
+```bash
+cheragh index ./docs --output .cheragh_index --incremental
+cheragh inspect-index --index .cheragh_index
+```
+
+### Serveur API
+
+```bash
+cheragh serve --config examples/rag_v04.yaml --host 0.0.0.0 --port 8000
+```
+
+## Notes de version 0.4.1
+
+Ajouts ciblés : chunking avancé et routing applicatif.
+
+### Chunkers avancés
+
+Nouveaux chunkers exportés depuis `cheragh.ingestion` :
+
+- `SemanticChunker` : découpe par rupture de similarité entre phrases.
+- `CodeChunker` : découpe les fichiers code autour des classes, fonctions et statements SQL.
+- `TableChunker` : extrait et découpe les tables Markdown/CSV-like par groupes de lignes.
+- `PDFLayoutChunker` : découpe les pages PDF en blocs de type heading, paragraph, table, caption.
+- `HierarchicalChunker` : produit des chunks parent/child en conservant `section_path` et `hierarchy_level`.
+
+```python
+from cheragh import HashingEmbedding, Document
+from cheragh.ingestion import SemanticChunker
+
+chunks = SemanticChunker(
+    embedding_model=HashingEmbedding(dimension=384),
+    breakpoint_threshold=0.75,
+).split_documents([
+    Document("Le chat dort. Le chien joue. Le RAG récupère des documents.", doc_id="demo")
+])
+```
+
+### Routing de requêtes
+
+Nouveau package `cheragh.routing` avec un routeur applicatif `QueryRouter.ask(...)`.
+
+```python
+from cheragh.routing import QueryRouter
+
+router = QueryRouter(
+    routes={
+        "qa": qa_engine,
+        "summary": summary_engine,
+        "sql": sql_engine,
+    }
+)
+
+response = router.ask("Compare les ventes Q1 et Q2")
+```
+
+Le routeur accepte des `RAGEngine`, pipelines avec `ask`/`run`, retrievers avec `retrieve`, ou simples callables Python. L’ancien routeur de retrievers reste disponible via `cheragh.router.QueryRouter` ou `cheragh.LegacyRetrieverQueryRouter`.
+
+## v0.5.0 architectures RAG
+
+La v0.5.0 ajoute `ParentChildRetriever`, `CorrectiveRAGEngine`, `ConversationalRAGEngine` et `RAGWorkflow`. Voir `docs/architectures_v05.md` et `examples/architectures_v05.py`.
+
+## v0.6.0 — architectures RAG avancées
+
+La v0.6.0 ajoute :
+
+- `MultiHopRAGEngine` pour les questions multi-étapes
+- `GraphRAGEngine` pour la récupération par entités/relations
+- `RAPTOREngine` pour l'indexation hiérarchique par résumés
+- `FederatedRAGEngine` pour interroger plusieurs sources/index/domaines
+
+Voir `docs/architectures_v06.md` et `examples/architectures_v06.py`.
+
+## v0.7.0 — Structured & Enterprise RAG
+
+Cette version ajoute :
+
+- `SQLRAGEngine` pour interroger SQLite / tables matérialisées en SQL read-only
+- `StructuredRAG` pour CSV, records Python et tables en mémoire
+- `AccessPolicy`, `Principal`, `AccessControlledRetriever`, `AccessControlledRAGEngine`
+- `MultiTenantRAGEngine` et `TenantRegistry`
+- `FeedbackLoop`, `JSONLFeedbackStore`, export d'evalset JSONL
+
+Exemple :
+
+```python
+from cheragh import SQLRAGEngine, FeedbackLoop
+
+engine = SQLRAGEngine.from_records(
+    "sales",
+    [{"client": "Alpha", "revenue": 100}, {"client": "Beta", "revenue": 180}],
+)
+response = engine.ask("Quel est le revenu total ?")
+print(response.answer)
+
+feedback = FeedbackLoop.from_jsonl("feedback.jsonl")
+feedback.log_feedback("Quel est le revenu total ?", "good", response=response)
+```
+
+Voir aussi `docs/enterprise_v07.md` et `examples/enterprise_v07.py`.
+
+## v0.7.1 — Advanced caching
+
+The package now includes `cheragh.cache` with memory, SQLite and optional Redis backends.
+
+```python
+from cheragh import RAGEngine
+
+engine = RAGEngine.from_config("rag.yaml")
+response = engine.ask("Que dit le document ?")
+print(response.metadata["cache"])
+```
+
+Config example:
+
+```yaml
+cache:
+  enabled: true
+  backend: sqlite
+  path: .cheragh/cache.sqlite
+  serializer: json  # v0.8: safe default; use signed-pickle + secret_key only for trusted rich objects
+  ttl: 3600
+  cache_embeddings: true
+  cache_retrieval: true
+  cache_reranking: true
+  cache_llm: true
+```
+
+Direct usage:
+
+```python
+from cheragh.cache import SQLiteCache
+
+cache = SQLiteCache(".cheragh/cache.sqlite", default_ttl=3600)
+cache.set("key", "value")
+print(cache.get("key"))
+print(cache.stats().to_dict())
+```
+
+## v0.9.0 — qualité RAG
+
+Cette version ajoute des améliorations de qualité retrieval : tokenisation hybride Unicode/accent-insensitive, filtres metadata enrichis, offsets de citations dans les chunks, métriques `recall@k`, `nDCG@k`, `context_precision@k`, et presets production documentés.
+
+Voir :
+
+- `docs/quality_v090.md`
+- `docs/production.md`
+- `examples/presets/production_hybrid.yaml`
+- `examples/presets/local_quality.yaml`
+
+## v1.0.0 production baseline
+
+The v1.0.0 baseline stabilizes the public schema (`Document`, `Chunk`, `Source`, `RAGResponse` and protocol types), adds JSONL trace export, and makes local indexing incremental by default.
+
+Useful commands:
+
+```bash
+cheragh index ./docs --output .cheragh_index --dry-run
+cheragh index ./docs --output .cheragh_index
+cheragh ask "What changed?" --index .cheragh_index --trace-output .cheragh/traces.jsonl --json
+cheragh inspect-index --index .cheragh_index
+cheragh doctor
+```
+
+See `docs/release_v100.md` and `examples/presets/production_v100.yaml` for production defaults.

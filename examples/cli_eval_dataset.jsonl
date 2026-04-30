@@ -1,0 +1,2 @@
+{"query": "retrieval génération sources", "expected_doc_ids": ["rag"]}
+{"query": "pyproject package python", "expected_doc_ids": ["python"]}

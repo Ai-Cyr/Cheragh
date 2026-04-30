@@ -1,0 +1,28 @@
+ingestion:
+  path: ./docs
+  recursive: true
+  chunk_size: 800
+  chunk_overlap: 120
+
+embedding:
+  provider: hashing
+  dimension: 384
+
+retriever:
+  type: memory
+  top_k: 5
+
+generation:
+  provider: extractive
+
+cache:
+  enabled: true
+  backend: sqlite
+  path: .cheragh/cache.sqlite
+  ttl: 3600
+  namespace: default
+  serializer: json
+  cache_embeddings: true
+  cache_retrieval: true
+  cache_reranking: true
+  cache_llm: true

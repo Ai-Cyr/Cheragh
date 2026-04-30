@@ -1,0 +1,67 @@
+ingestion:
+  path: ./docs
+  chunk_size: 900
+  chunk_overlap: 140
+  recursive: true
+  max_file_size_mb: 50
+  exclude_patterns:
+    - .git/**
+    - node_modules/**
+    - dist/**
+    - .venv/**
+
+embedding:
+  provider: hashing
+  dimension: 384
+
+retriever:
+  type: hybrid
+  top_k: 6
+  alpha: 0.55
+  tokenizer:
+    normalize_accents: true
+    lowercase: true
+    ngram_range: [1, 2]
+
+reranker:
+  enabled: true
+  provider: keyword
+  first_stage_top_k: 40
+
+compression:
+  enabled: true
+  type: default
+
+query:
+  enabled: true
+  type: multi-query
+
+generation:
+  provider: extractive
+
+cache:
+  enabled: true
+  backend: sqlite
+  path: .cheragh/cache.sqlite
+  serializer: json
+  ttl: 86400
+
+observability:
+  enabled: true
+  trace_export_path: .cheragh/traces.jsonl
+  trace_include_prompt: false
+  pricing:
+    currency: USD
+    input_per_1k: 0.0
+    output_per_1k: 0.0
+
+indexing:
+  incremental: true
+  dry_run: false
+  use_lock: true
+  lock_timeout_seconds: 10
+
+strict_grounding: true
+require_citations: true
+flag_unsourced_sentences: true
+trace_enabled: true
