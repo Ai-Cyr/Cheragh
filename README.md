@@ -1,4 +1,5 @@
 # Cheragh — package Python standard
+<img width="2912" height="1440" alt="Cheragh" src="https://github.com/user-attachments/assets/4cad2b57-04bb-46f7-a26f-21cf670ec14b" />
 
 Package Python autonome pour construire des pipelines RAG composables : ingestion, chunking, index vectoriel local, retrieval hybride, transformations de requête, évaluation, CLI et génération avec LLM injectable.
 
