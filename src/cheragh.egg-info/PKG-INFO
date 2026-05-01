@@ -89,7 +89,7 @@ Dynamic: license-file
 
 Package Python autonome pour construire des pipelines RAG composables : ingestion, chunking, index vectoriel local, retrieval hybride, transformations de requête, évaluation, CLI et génération avec LLM injectable.
 
-Le package ne dépend pas de Dataiku. Les intégrations externes — OpenAI, sentence-transformers, PDF, DOCX — sont optionnelles.
+Les intégrations externes — OpenAI, sentence-transformers, PDF, DOCX — sont optionnelles.
 
 ## Installation
 
