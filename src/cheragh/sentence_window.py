@@ -32,6 +32,7 @@ class SentenceWindowRetriever(BaseRetriever):
         embedding_model: EmbeddingModel,
         window_size: int = 3,
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ):
         if window_size < 0:
             raise ValueError("window_size doit être >= 0.")
@@ -39,6 +40,7 @@ class SentenceWindowRetriever(BaseRetriever):
         self.embedding_model = embedding_model
         self.window_size = window_size
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
         self._documents = documents  # référence pour hash uniquement
 
         # State à construire ou à recharger
@@ -105,6 +107,7 @@ class SentenceWindowRetriever(BaseRetriever):
             expected_content_hash=hash_documents(self._documents),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False

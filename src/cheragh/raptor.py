@@ -41,6 +41,7 @@ class RAPTORRetriever(BaseRetriever):
         min_cluster_size: int = 2,
         random_state: int = 42,
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ):
         self.embedding_model = embedding_model
         self.llm_client = llm_client
@@ -49,6 +50,7 @@ class RAPTORRetriever(BaseRetriever):
         self.min_cluster_size = min_cluster_size
         self.random_state = random_state
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
         self._input_documents = documents  # référence pour hash
 
         self.all_nodes: List[Document] = []
@@ -92,6 +94,7 @@ class RAPTORRetriever(BaseRetriever):
             expected_content_hash=hash_documents(self._input_documents),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False

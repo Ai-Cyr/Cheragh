@@ -1,10 +1,9 @@
 """Advanced structure-, semantic- and layout-aware chunkers."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import csv
 import io
-import math
 import re
 from typing import Iterable, Sequence
 

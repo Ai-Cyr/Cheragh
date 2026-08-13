@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
-from typing import Any, Iterable, Iterator
+from typing import Any, Generator, Iterable, Iterator
 
 from .base import BaseRetriever, Document, EmbeddingModel, ExtractiveLLMClient, HashingEmbedding, LLMClient, OpenAILLMClient
 from .citations import citation_location, extract_citations, validate_citations
@@ -23,6 +23,36 @@ from .cache import (
     CachedRetriever,
     build_cache_backend,
 )
+
+
+class RAGStream(Iterator[str]):
+    """Text iterator that exposes its final response after full consumption.
+
+    ``response`` remains ``None`` while chunks are being produced. Once the
+    iterator is exhausted it contains the same structured metadata that
+    :meth:`RAGEngine.ask` returns, including citations, warnings and the trace.
+    Existing callers can keep treating this object as an ``Iterator[str]``.
+    """
+
+    def __init__(self, iterator: Generator[str, None, RAGResponse]):
+        self._iterator = iterator
+        self.response: RAGResponse | None = None
+
+    def __iter__(self) -> "RAGStream":
+        return self
+
+    def __next__(self) -> str:
+        try:
+            return next(self._iterator)
+        except StopIteration as stop:
+            if isinstance(stop.value, RAGResponse):
+                self.response = stop.value
+            raise
+
+    def close(self) -> None:
+        """Stop streaming early without consuming the remaining chunks."""
+
+        self._iterator.close()
 
 
 class RAGEngine:
@@ -193,7 +223,7 @@ class RAGEngine:
             docs,
             embedding_model=embedder,
             llm_client=llm,
-            retriever_type=str(retriever_cfg.get("type", vectorstore_cfg.get("type", "hybrid"))),
+            retriever_type=str(vectorstore_cfg.get("type") or retriever_cfg.get("type", "hybrid")),
             alpha=float(retriever_cfg.get("alpha", 0.5)),
             top_k=int(retriever_cfg.get("top_k", 5)),
             strict_grounding=bool(config.get("strict_grounding", False)),
@@ -204,6 +234,7 @@ class RAGEngine:
             collection_name=vectorstore_cfg.get("collection_name", "cheragh"),
             qdrant_url=vectorstore_cfg.get("url"),
             qdrant_api_key=vectorstore_cfg.get("api_key"),
+            normalize=bool(vectorstore_cfg.get("normalize", True)),
             filters=retriever_cfg.get("filters") or None,
             tokenizer_config=retriever_cfg.get("tokenizer") or None,
             reranker=reranker,
@@ -211,7 +242,8 @@ class RAGEngine:
             first_stage_top_k=int(reranker_cfg.get("first_stage_top_k", 30)),
             compressor=str(compression_cfg.get("type", "default")) if bool(compression_cfg.get("enabled", False)) else None,
             query_transformer=str(query_cfg.get("transform", query_cfg.get("type", "multi-query"))) if bool(query_cfg.get("enabled", False)) else None,
-            trace_enabled=bool(config.get("trace_enabled", True)),
+            answer_prompt=config.get("answer_prompt") or DEFAULT_ANSWER_PROMPT_FR,
+            trace_enabled=bool(config.get("trace_enabled", True)) and bool(observability_cfg.get("enabled", True)),
             cache_backend=cache_backend,
             cache_config=cache_cfg,
             trace_export_path=observability_cfg.get("trace_export_path"),
@@ -309,13 +341,169 @@ class RAGEngine:
         return await asyncio.to_thread(self.ask, query, top_k, **generate_kwargs)
 
     def stream(self, query: str, top_k: int | None = None, **generate_kwargs: Any) -> Iterator[str]:
+        """Yield answer text chunks.
+
+        Use :meth:`stream_with_response` when structured citations, warnings or
+        trace metadata are needed after the text stream has been consumed.
+        """
+
+        yield from self.stream_with_response(query, top_k=top_k, **generate_kwargs)
+
+    def stream_with_response(
+        self,
+        query: str,
+        top_k: int | None = None,
+        **generate_kwargs: Any,
+    ) -> RAGStream:
+        """Return a text stream with a final :class:`RAGResponse` side channel.
+
+        The caller must exhaust the iterator before reading ``stream.response``.
+        This keeps the wire format of :meth:`stream` text-only while providing
+        non-breaking access to citations, warnings, sources and tracing.
+        """
+
+        return RAGStream(self._stream_with_response(query, top_k=top_k, **generate_kwargs))
+
+    def _stream_with_response(
+        self,
+        query: str,
+        top_k: int | None = None,
+        **generate_kwargs: Any,
+    ) -> Generator[str, None, RAGResponse]:
+        trace = RAGTrace(query=query) if self.trace_enabled else None
         effective_top_k = top_k or self.top_k
-        docs = self._retrieve_variants(self._query_variants(query, None), effective_top_k=effective_top_k, trace=None)
+
+        query_variants = self._query_variants(query, trace)
+        step = trace.start_step("retrieval", query_count=len(query_variants), top_k=effective_top_k) if trace else None
+        docs = self._retrieve_variants(query_variants, effective_top_k=effective_top_k, trace=trace)
+        if step:
+            step.finish(document_count=len(docs))
+
+        warnings: list[str] = []
+        if self.min_score is not None:
+            before = len(docs)
+            docs = [doc for doc in docs if doc.score is None or doc.score >= self.min_score]
+            if trace:
+                trace.warnings.append(f"min_score_filtered:{before - len(docs)}")
         if self.compressor is not None and docs:
+            step = trace.start_step("compression", compressor=self.compressor.__class__.__name__) if trace else None
+            before_chars = sum(len(doc.content) for doc in docs)
             docs = self.compressor.compress(query, docs)
+            after_chars = sum(len(doc.content) for doc in docs)
+            if trace:
+                trace.compression = {
+                    "before_chars": before_chars,
+                    "after_chars": after_chars,
+                    "document_count": len(docs),
+                }
+            if step:
+                step.finish(before_chars=before_chars, after_chars=after_chars, document_count=len(docs))
+        if self.strict_grounding and not docs:
+            answer = "Je ne sais pas : aucun extrait suffisamment pertinent n'a été trouvé."
+            yield answer
+            validation = validate_citations(
+                answer,
+                [],
+                require_citations=self.require_citations,
+                flag_unsourced_sentences=self.flag_unsourced_sentences,
+            )
+            return RAGResponse(
+                query=query,
+                answer=answer,
+                sources=[],
+                retrieved_documents=[],
+                prompt="",
+                metadata={"strict_grounding": True},
+                citations=validation.citations,
+                warnings=["no_relevant_documents"],
+                grounded_score=0.0,
+                unsourced_claims=validation.unsourced_claims,
+                citation_validation=validation,
+                trace=self._finalize_trace(trace, answer=answer, prompt=""),
+            )
+
         context = AdvancedRAGPipeline._format_context(docs)
         prompt = self.answer_prompt.format(context=context, query=query)
-        yield from self.llm_client.stream(prompt, **generate_kwargs)
+        if trace:
+            trace.prompt = prompt
+        step = trace.start_step("generation", prompt_chars=len(prompt), streaming=True) if trace else None
+        chunks: list[str] = []
+        try:
+            for chunk in self.llm_client.stream(prompt, **generate_kwargs):
+                chunks.append(chunk)
+                yield chunk
+        except GeneratorExit:
+            partial_answer = "".join(chunks)
+            if step:
+                step.finish(answer_chars=len(partial_answer), cancelled=True)
+            if trace:
+                trace.warnings.append("stream_cancelled")
+                trace.record_generation(
+                    prompt=prompt,
+                    answer=partial_answer,
+                    model=getattr(self.llm_client, "model", None),
+                    pricing=self.trace_pricing,
+                )
+                self._finalize_trace(trace, answer=partial_answer, prompt=prompt)
+            raise
+        except Exception as exc:
+            partial_answer = "".join(chunks)
+            if step:
+                step.finish(answer_chars=len(partial_answer), error=type(exc).__name__)
+            if trace:
+                trace.warnings.append("stream_generation_error")
+                trace.record_generation(
+                    prompt=prompt,
+                    answer=partial_answer,
+                    model=getattr(self.llm_client, "model", None),
+                    pricing=self.trace_pricing,
+                )
+                self._finalize_trace(trace, answer=partial_answer, prompt=prompt)
+            raise
+
+        answer = "".join(chunks)
+        if step:
+            step.finish(answer_chars=len(answer))
+        if trace:
+            trace.record_generation(
+                prompt=prompt,
+                answer=answer,
+                model=getattr(self.llm_client, "model", None),
+                pricing=self.trace_pricing,
+            )
+        validation = validate_citations(
+            answer,
+            docs,
+            require_citations=self.require_citations,
+            flag_unsourced_sentences=self.flag_unsourced_sentences,
+        )
+        warnings.extend(validation.warnings)
+        if self.strict_grounding and validation.unknown_citations:
+            warnings.append("strict_grounding_unknown_citations")
+        if trace:
+            trace.warnings.extend(warnings)
+
+        return RAGResponse(
+            query=query,
+            answer=answer,
+            sources=[
+                Source(doc.doc_id, doc.score, doc.content[:240], dict(doc.metadata), citation_location(doc))
+                for doc in docs
+            ],
+            retrieved_documents=docs,
+            prompt=prompt,
+            metadata={
+                "top_k": effective_top_k,
+                "strict_grounding": self.strict_grounding,
+                "cache": self.cache_backend.stats().to_dict() if self.cache_backend else None,
+            },
+            citations=validation.citations,
+            warnings=warnings,
+            grounded_score=validation.grounded_score,
+            unsourced_claims=validation.unsourced_claims,
+            citation_validation=validation,
+            trace=self._finalize_trace(trace, answer=answer, prompt=prompt),
+        )
 
     async def astream(self, query: str, top_k: int | None = None, **generate_kwargs: Any):
         """Async streaming wrapper. Yields chunks from the synchronous stream."""
@@ -361,7 +549,15 @@ def _build_retriever(
     filters = kwargs.get("filters")
     tokenizer = _tokenizer_from_config(kwargs.get("tokenizer") or kwargs.get("tokenizer_config"))
     if rt == "hybrid":
-        return HybridSearchRetriever(docs, embedder, alpha=alpha, cache_path=kwargs.get("cache_path"), filters=filters, tokenizer=tokenizer)
+        return HybridSearchRetriever(
+            docs,
+            embedder,
+            alpha=alpha,
+            cache_path=kwargs.get("cache_path"),
+            filters=filters,
+            tokenizer=tokenizer,
+            allow_unsafe_pickle=bool(kwargs.get("allow_unsafe_pickle", False)),
+        )
     if rt in {"vector", "memory"}:
         from .vectorstores.memory import MemoryVectorStore
 

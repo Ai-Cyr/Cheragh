@@ -42,6 +42,7 @@ class PropositionalRetriever(BaseRetriever):
         return_propositions: bool = False,
         max_propositions_per_doc: int = 20,
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ):
         self.documents = documents
         self.embedding_model = embedding_model
@@ -49,6 +50,7 @@ class PropositionalRetriever(BaseRetriever):
         self.return_propositions = return_propositions
         self.max_propositions_per_doc = max_propositions_per_doc
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
 
         self._propositions: List[str] = []
         self._prop_to_doc: List[int] = []
@@ -123,6 +125,7 @@ class PropositionalRetriever(BaseRetriever):
             expected_content_hash=hash_documents(self.documents),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False

@@ -26,10 +26,10 @@ _LAZY_EXPORTS = {
 __all__ = list(_LAZY_EXPORTS)
 
 if TYPE_CHECKING:  # pragma: no cover - imported only by static type checkers
-    from .chroma import ChromaRetriever, ChromaVectorStore, require_chromadb
-    from .faiss import FaissRetriever, FaissVectorStore, require_faiss
-    from .memory import MemoryVectorStore, VectorStoreRetriever
-    from .qdrant import QdrantRetriever, QdrantVectorStore, require_qdrant_client
+    from .chroma import ChromaRetriever, ChromaVectorStore, require_chromadb  # noqa: F401
+    from .faiss import FaissRetriever, FaissVectorStore, require_faiss  # noqa: F401
+    from .memory import MemoryVectorStore, VectorStoreRetriever  # noqa: F401
+    from .qdrant import QdrantRetriever, QdrantVectorStore, require_qdrant_client  # noqa: F401
 
 
 def __getattr__(name: str) -> Any:

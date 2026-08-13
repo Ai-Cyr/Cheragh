@@ -4,9 +4,9 @@ These functions preserve the older v0.x pickle retriever cache API used by
 retrievers such as HybridSearchRetriever. New applications should prefer
 CacheBackend implementations and sign persistent pickle caches with HMAC.
 
-Security note: ``load_cache`` uses pickle for backward compatibility. Only load
-legacy cache files from trusted locations. Set ``allow_unsafe_pickle=False`` to
-turn cache hits into safe misses instead of deserializing untrusted data.
+Security note: ``load_cache`` uses pickle for backward compatibility. Legacy
+cache loading is disabled by default. Set ``allow_unsafe_pickle=True`` only for
+cache files from trusted locations.
 """
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def load_cache(
     expected_embedder_fp: str,
     expected_extra_fp: str = "",
     *,
-    allow_unsafe_pickle: bool = True,
+    allow_unsafe_pickle: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if not path or not os.path.exists(path):
         return None

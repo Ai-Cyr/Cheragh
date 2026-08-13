@@ -34,6 +34,7 @@ class HyDERetriever(BaseRetriever):
         prompt_template: str = HYDE_PROMPT_FR,
         n_hypotheses: int = 1,
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ):
         if n_hypotheses < 1:
             raise ValueError("n_hypotheses doit être >= 1.")
@@ -44,6 +45,7 @@ class HyDERetriever(BaseRetriever):
         self.prompt_template = prompt_template
         self.n_hypotheses = n_hypotheses
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
 
         self.doc_embeddings: Optional[np.ndarray] = None
         if not self._try_load_cache():
@@ -86,6 +88,7 @@ class HyDERetriever(BaseRetriever):
             expected_content_hash=hash_documents(self.documents),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False

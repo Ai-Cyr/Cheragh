@@ -582,5 +582,6 @@ def _simple_where_clause(question: str, table: TableSchema) -> str:
         match = re.search(rf"{re.escape(col_lower)}\s*(?:=|est|equals|vaut)\s*['\"]?([\wÀ-ÿ .-]+)['\"]?", q)
         if match:
             value = match.group(1).strip().strip(".,;:!?'")
-            clauses.append(f'"{col}" = \'{value.replace("'", "''")}\'')
+            escaped_value = value.replace("'", "''")
+            clauses.append(f'"{col}" = \'{escaped_value}\'')
     return " WHERE " + " AND ".join(clauses) if clauses else ""

@@ -19,7 +19,7 @@ retriever:
   top_k: 6
   alpha: 0.55
   tokenizer:
-    normalize_accents: true
+    strip_accents: true
     lowercase: true
     ngram_range: [1, 2]
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
+from uuid import uuid4
 
 from ..base import BaseRetriever, Document, EmbeddingModel
 
@@ -42,7 +43,10 @@ class ChromaVectorStore:
         docs = list(documents)
         if not docs:
             return
-        ids = [doc.doc_id or f"doc-{i}" for i, doc in enumerate(docs)]
+        # Explicit document IDs retain Chroma's upsert semantics.  Anonymous
+        # documents need globally unique IDs: restarting ``enumerate`` for every
+        # call used to overwrite ``doc-0``, ``doc-1``, ... from earlier batches.
+        ids = [str(doc.doc_id) if doc.doc_id else f"auto-{uuid4().hex}" for doc in docs]
         embeddings = self.embedding_model.embed_documents([doc.content for doc in docs]).tolist()
         metadatas = [_safe_metadata(doc.metadata) for doc in docs]
         self.collection.upsert(ids=ids, documents=[doc.content for doc in docs], metadatas=metadatas, embeddings=embeddings)

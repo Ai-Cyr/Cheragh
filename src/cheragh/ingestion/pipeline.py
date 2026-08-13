@@ -23,6 +23,8 @@ DEFAULT_EXCLUDE_PATTERNS = (
     "venv/**",
     "env/**",
     "node_modules/**",
+    ".cheragh/**",
+    ".cheragh_index/**",
     "dist/**",
     "build/**",
     "*.pyc",
@@ -54,7 +56,7 @@ def load_documents(
     if not p.exists():
         raise FileNotFoundError(str(p))
 
-    patterns = tuple(exclude_patterns or DEFAULT_EXCLUDE_PATTERNS)
+    patterns = _combined_exclude_patterns(exclude_patterns)
     root = p.parent if p.is_file() else p
     files = [p] if p.is_file() else list(_iter_candidate_files(p, recursive=recursive, exclude_patterns=patterns))
     documents: list[Document] = []
@@ -124,3 +126,9 @@ def _looks_binary(path: Path, sample_size: int = 4096) -> bool:
     if not sample:
         return False
     return b"\x00" in sample
+
+
+def _combined_exclude_patterns(exclude_patterns: Sequence[str] | None = None) -> tuple[str, ...]:
+    """Keep safety defaults when callers add their own exclusion patterns."""
+
+    return tuple(dict.fromkeys((*DEFAULT_EXCLUDE_PATTERNS, *(exclude_patterns or ()))))

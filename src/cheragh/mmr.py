@@ -22,6 +22,7 @@ class MMRRetriever(BaseRetriever):
         lambda_mult: float = 0.5,
         fetch_k: int = 30,
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ):
         if (documents is None) == (base_retriever is None):
             raise ValueError("Spécifier exactement un de `documents` ou `base_retriever`.")
@@ -34,6 +35,7 @@ class MMRRetriever(BaseRetriever):
         self.lambda_mult = lambda_mult
         self.fetch_k = fetch_k
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
 
         # Le cache n'a de sens qu'en mode autonome (avec corpus propre)
         self.doc_embeddings: Optional[np.ndarray] = None
@@ -108,6 +110,7 @@ class MMRRetriever(BaseRetriever):
             expected_content_hash=hash_documents(self.documents),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False
