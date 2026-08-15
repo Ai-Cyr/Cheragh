@@ -23,8 +23,14 @@ from .base import (
 )
 
 if TYPE_CHECKING:
+    from .adaptive import AdaptiveRAGEngine as AdaptiveRAGEngine
+    from .adaptive import AdaptiveRAGRoute as AdaptiveRAGRoute
     from .adaptive import AdaptiveRetriever as AdaptiveRetriever
+    from .adaptive import AdaptiveRoutingDecision as AdaptiveRoutingDecision
     from .adaptive import GateDecision as GateDecision
+    from .adaptive import HeuristicComplexityClassifier as HeuristicComplexityClassifier
+    from .adaptive import LLMComplexityClassifier as LLMComplexityClassifier
+    from .adaptive import QueryComplexityClassifier as QueryComplexityClassifier
     from .agentic import AgentAction as AgentAction
     from .agentic import AgenticRAGEngine as AgenticRAGEngine
     from .agentic import AgenticRAGResult as AgenticRAGResult
@@ -82,13 +88,26 @@ if TYPE_CHECKING:
     from .community_graph import CommunitySummarizer as CommunitySummarizer
     from .community_graph import DeterministicCommunitySummarizer as DeterministicCommunitySummarizer
     from .community_graph import detect_communities as detect_communities
+    from .context_packing import ContextPacker as ContextPacker
+    from .context_packing import DroppedDocument as DroppedDocument
+    from .context_packing import LongContextPacker as LongContextPacker
+    from .context_packing import PackedContext as PackedContext
+    from .context_packing import PackingDiagnostics as PackingDiagnostics
+    from .context_packing import SourceTokenUsage as SourceTokenUsage
+    from .context_packing import approximate_token_count as approximate_token_count
+    from .context_packing import format_document_with_citation as format_document_with_citation
+    from .context_packing import lost_in_the_middle_order as lost_in_the_middle_order
+    from .context_packing import pack_context as pack_context
     from .contextual_compression import ContextualCompressionRetriever as ContextualCompressionRetriever
     from .conversation import ConversationTurn as ConversationTurn
     from .conversation import ConversationalRAGEngine as ConversationalRAGEngine
     from .conversation import InMemoryConversationStore as InMemoryConversationStore
     from .corrective import CorrectiveRAGEngine as CorrectiveRAGEngine
     from .corrective import CorrectiveRAGResult as CorrectiveRAGResult
+    from .corrective import KnowledgeRefiner as KnowledgeRefiner
+    from .corrective import LexicalKnowledgeRefiner as LexicalKnowledgeRefiner
     from .corrective import LexicalRetrievalGrader as LexicalRetrievalGrader
+    from .corrective import RetrievalAction as RetrievalAction
     from .corrective import RetrievalGrade as RetrievalGrade
     from .corrective_rag import CorrectiveRAGRetriever as CorrectiveRAGRetriever
     from .corrective_rag import DocQuality as DocQuality
@@ -98,15 +117,28 @@ if TYPE_CHECKING:
     from .embeddings import VoyageEmbedding as VoyageEmbedding
     from .engine import RAGEngine as RAGEngine
     from .engine import RAGStream as RAGStream
+    from .evaluation import CitationAlignment as CitationAlignment
+    from .evaluation import Claim as Claim
+    from .evaluation import ClaimDiagnostic as ClaimDiagnostic
+    from .evaluation import ClaimEvaluationResult as ClaimEvaluationResult
+    from .evaluation import ClaimEvaluator as ClaimEvaluator
+    from .evaluation import ClaimSegmenter as ClaimSegmenter
+    from .evaluation import ClaimStatus as ClaimStatus
+    from .evaluation import EntailmentScore as EntailmentScore
+    from .evaluation import EvidenceAssessment as EvidenceAssessment
+    from .evaluation import EvidenceEntailmentScorer as EvidenceEntailmentScorer
     from .evaluation import GenerationEvaluationResult as GenerationEvaluationResult
+    from .evaluation import LexicalEntailmentScorer as LexicalEntailmentScorer
     from .evaluation import RetrievalEvaluationResult as RetrievalEvaluationResult
     from .evaluation import RetrievalExample as RetrievalExample
     from .evaluation import context_precision_at_k as context_precision_at_k
     from .evaluation import evaluate_generation as evaluate_generation
+    from .evaluation import evaluate_claims as evaluate_claims
     from .evaluation import evaluate_pipeline as evaluate_pipeline
     from .evaluation import evaluate_retrieval as evaluate_retrieval
     from .evaluation import ndcg_at_k as ndcg_at_k
     from .evaluation import recall_at_k as recall_at_k
+    from .evaluation import SentenceClaimSegmenter as SentenceClaimSegmenter
     from .federated import FederatedRAGEngine as FederatedRAGEngine
     from .federated import FederatedRAGResult as FederatedRAGResult
     from .federated import FederatedRetriever as FederatedRetriever
@@ -117,7 +149,12 @@ if TYPE_CHECKING:
     from .feedback import InMemoryFeedbackStore as InMemoryFeedbackStore
     from .feedback import JSONLFeedbackStore as JSONLFeedbackStore
     from .filters import metadata_matches as metadata_matches
+    from .flare import DraftUncertainty as DraftUncertainty
+    from .flare import DraftUncertaintyEstimator as DraftUncertaintyEstimator
     from .flare import FLAREPipeline as FLAREPipeline
+    from .flare import LengthBasedDraftUncertainty as LengthBasedDraftUncertainty
+    from .flare import TokenConfidence as TokenConfidence
+    from .flare import TokenConfidenceUncertaintyEstimator as TokenConfidenceUncertaintyEstimator
     from .graph import GraphRAGEngine as GraphRAGEngine
     from .graph import GraphRAGRetriever as GraphRAGRetriever
     from .graph import KnowledgeGraph as KnowledgeGraph
@@ -158,8 +195,15 @@ if TYPE_CHECKING:
     from .llms import OpenAIChatClient as OpenAIChatClient
     from .mmr import MMRRetriever as MMRRetriever
     from .multihop import EvidenceHop as EvidenceHop
+    from .multihop import LLMMultiHopPlanner as LLMMultiHopPlanner
+    from .multihop import MultiHopPlanner as MultiHopPlanner
     from .multihop import MultiHopRAGEngine as MultiHopRAGEngine
     from .multihop import MultiHopRAGResult as MultiHopRAGResult
+    from .multihop import PlanningAction as PlanningAction
+    from .multihop import PlanningContext as PlanningContext
+    from .multihop import PlanningDecision as PlanningDecision
+    from .multihop import QueryDecomposer as QueryDecomposer
+    from .multihop import RuleBasedMultiHopPlanner as RuleBasedMultiHopPlanner
     from .multihop import RuleBasedQueryDecomposer as RuleBasedQueryDecomposer
     from .multimodal import CallableMultimodalEmbedding as CallableMultimodalEmbedding
     from .multimodal import CallableVisualLateInteractionEncoder as CallableVisualLateInteractionEncoder
@@ -292,7 +336,7 @@ if TYPE_CHECKING:
     from .workflow import TransformQueryNode as TransformQueryNode
     from .workflow import WorkflowResult as WorkflowResult
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 _LAZY_EXPORTS = {
     "embedder_fingerprint": (".cache", "embedder_fingerprint"),
@@ -326,6 +370,16 @@ _LAZY_EXPORTS = {
     "CompressionPipeline": (".compression", "CompressionPipeline"),
     "ExtractiveContextCompressor": (".compression", "ExtractiveContextCompressor"),
     "RedundancyFilter": (".compression", "RedundancyFilter"),
+    "ContextPacker": (".context_packing", "ContextPacker"),
+    "DroppedDocument": (".context_packing", "DroppedDocument"),
+    "LongContextPacker": (".context_packing", "LongContextPacker"),
+    "PackedContext": (".context_packing", "PackedContext"),
+    "PackingDiagnostics": (".context_packing", "PackingDiagnostics"),
+    "SourceTokenUsage": (".context_packing", "SourceTokenUsage"),
+    "approximate_token_count": (".context_packing", "approximate_token_count"),
+    "format_document_with_citation": (".context_packing", "format_document_with_citation"),
+    "lost_in_the_middle_order": (".context_packing", "lost_in_the_middle_order"),
+    "pack_context": (".context_packing", "pack_context"),
     "AzureOpenAIEmbedding": (".embeddings", "AzureOpenAIEmbedding"),
     "CohereEmbedding": (".embeddings", "CohereEmbedding"),
     "OpenAIEmbedding": (".embeddings", "OpenAIEmbedding"),
@@ -339,15 +393,28 @@ _LAZY_EXPORTS = {
     "EmbeddingProtocol": (".schema", "EmbeddingProtocol"),
     "LLMProtocol": (".schema", "LLMProtocol"),
     "RerankerProtocol": (".schema", "RerankerProtocol"),
+    "CitationAlignment": (".evaluation", "CitationAlignment"),
+    "Claim": (".evaluation", "Claim"),
+    "ClaimDiagnostic": (".evaluation", "ClaimDiagnostic"),
+    "ClaimEvaluationResult": (".evaluation", "ClaimEvaluationResult"),
+    "ClaimEvaluator": (".evaluation", "ClaimEvaluator"),
+    "ClaimSegmenter": (".evaluation", "ClaimSegmenter"),
+    "ClaimStatus": (".evaluation", "ClaimStatus"),
+    "EntailmentScore": (".evaluation", "EntailmentScore"),
+    "EvidenceAssessment": (".evaluation", "EvidenceAssessment"),
+    "EvidenceEntailmentScorer": (".evaluation", "EvidenceEntailmentScorer"),
     "GenerationEvaluationResult": (".evaluation", "GenerationEvaluationResult"),
+    "LexicalEntailmentScorer": (".evaluation", "LexicalEntailmentScorer"),
     "RetrievalEvaluationResult": (".evaluation", "RetrievalEvaluationResult"),
     "RetrievalExample": (".evaluation", "RetrievalExample"),
     "recall_at_k": (".evaluation", "recall_at_k"),
     "ndcg_at_k": (".evaluation", "ndcg_at_k"),
     "context_precision_at_k": (".evaluation", "context_precision_at_k"),
     "evaluate_generation": (".evaluation", "evaluate_generation"),
+    "evaluate_claims": (".evaluation", "evaluate_claims"),
     "evaluate_pipeline": (".evaluation", "evaluate_pipeline"),
     "evaluate_retrieval": (".evaluation", "evaluate_retrieval"),
+    "SentenceClaimSegmenter": (".evaluation", "SentenceClaimSegmenter"),
     "BM25Retriever": (".hybrid_search", "BM25Retriever"),
     "HybridSearchRetriever": (".hybrid_search", "HybridSearchRetriever"),
     "RetrievalTokenizer": (".tokenization", "RetrievalTokenizer"),
@@ -469,7 +536,10 @@ _LAZY_EXPORTS = {
     "ParentChildRetriever": (".retrieval", "ParentChildRetriever"),
     "CorrectiveRAGEngine": (".corrective", "CorrectiveRAGEngine"),
     "CorrectiveRAGResult": (".corrective", "CorrectiveRAGResult"),
+    "KnowledgeRefiner": (".corrective", "KnowledgeRefiner"),
+    "LexicalKnowledgeRefiner": (".corrective", "LexicalKnowledgeRefiner"),
     "RetrievalGrade": (".corrective", "RetrievalGrade"),
+    "RetrievalAction": (".corrective", "RetrievalAction"),
     "LexicalRetrievalGrader": (".corrective", "LexicalRetrievalGrader"),
     "ConversationalRAGEngine": (".conversation", "ConversationalRAGEngine"),
     "ConversationTurn": (".conversation", "ConversationTurn"),
@@ -506,6 +576,13 @@ _LAZY_EXPORTS = {
     "MultiHopRAGEngine": (".multihop", "MultiHopRAGEngine"),
     "MultiHopRAGResult": (".multihop", "MultiHopRAGResult"),
     "EvidenceHop": (".multihop", "EvidenceHop"),
+    "LLMMultiHopPlanner": (".multihop", "LLMMultiHopPlanner"),
+    "MultiHopPlanner": (".multihop", "MultiHopPlanner"),
+    "PlanningAction": (".multihop", "PlanningAction"),
+    "PlanningContext": (".multihop", "PlanningContext"),
+    "PlanningDecision": (".multihop", "PlanningDecision"),
+    "QueryDecomposer": (".multihop", "QueryDecomposer"),
+    "RuleBasedMultiHopPlanner": (".multihop", "RuleBasedMultiHopPlanner"),
     "RuleBasedQueryDecomposer": (".multihop", "RuleBasedQueryDecomposer"),
     "GraphRAGEngine": (".graph", "GraphRAGEngine"),
     "GraphRAGRetriever": (".graph", "GraphRAGRetriever"),
@@ -546,10 +623,21 @@ _LAZY_EXPORTS = {
     "JSONLFeedbackStore": (".feedback", "JSONLFeedbackStore"),
     "FeedbackLoop": (".feedback", "FeedbackLoop"),
     "RAPTORRetriever": (".raptor", "RAPTORRetriever"),
+    "DraftUncertainty": (".flare", "DraftUncertainty"),
+    "DraftUncertaintyEstimator": (".flare", "DraftUncertaintyEstimator"),
     "FLAREPipeline": (".flare", "FLAREPipeline"),
+    "LengthBasedDraftUncertainty": (".flare", "LengthBasedDraftUncertainty"),
+    "TokenConfidence": (".flare", "TokenConfidence"),
+    "TokenConfidenceUncertaintyEstimator": (".flare", "TokenConfidenceUncertaintyEstimator"),
     "PropositionalRetriever": (".propositional", "PropositionalRetriever"),
     "ChainOfNoteRetriever": (".chain_of_note", "ChainOfNoteRetriever"),
+    "AdaptiveRAGEngine": (".adaptive", "AdaptiveRAGEngine"),
+    "AdaptiveRAGRoute": (".adaptive", "AdaptiveRAGRoute"),
     "AdaptiveRetriever": (".adaptive", "AdaptiveRetriever"),
+    "AdaptiveRoutingDecision": (".adaptive", "AdaptiveRoutingDecision"),
+    "HeuristicComplexityClassifier": (".adaptive", "HeuristicComplexityClassifier"),
+    "LLMComplexityClassifier": (".adaptive", "LLMComplexityClassifier"),
+    "QueryComplexityClassifier": (".adaptive", "QueryComplexityClassifier"),
     "production_hybrid_rag": (".presets", "production_hybrid_rag"),
     "simple_rag": (".presets", "simple_rag"),
     "vector_rag": (".presets", "vector_rag"),

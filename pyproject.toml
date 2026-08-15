@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cheragh"
-version = "1.2.0"
+version = "1.3.0"
 description = "Composable RAG toolkit for standard Python applications"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -91,10 +91,17 @@ select = ["E4", "E7", "E9", "F"]
 ignore_missing_imports = true
 follow_imports = "silent"
 files = [
+  "src/cheragh/adaptive.py",
   "src/cheragh/agentic",
   "src/cheragh/catalog",
   "src/cheragh/community_graph",
+  "src/cheragh/context_packing.py",
+  "src/cheragh/corrective",
+  "src/cheragh/evaluation/claims.py",
+  "src/cheragh/flare.py",
+  "src/cheragh/multihop",
   "src/cheragh/multimodal",
+  "src/cheragh/raptor_engine",
   "src/cheragh/retrieval/learned.py",
   "src/cheragh/self_rag",
   "src/cheragh/temporal",

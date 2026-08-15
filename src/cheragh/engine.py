@@ -1,6 +1,8 @@
 """High-level RAG engine API."""
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 import asyncio
 from typing import Any, Generator, Iterable, Iterator
@@ -13,6 +15,7 @@ from .base import (
     HashingEmbedding,
     LLMClient,
     OpenAILLMClient,
+    _snapshot_document,
     _validate_top_k,
 )
 from .citations import extract_citations, validate_citations
@@ -22,6 +25,7 @@ from .ingestion import chunk_documents, ingest_path
 from .pipeline import DEFAULT_ANSWER_PROMPT_FR, AdvancedRAGPipeline
 from .reranking import BaseReranker, RerankingRetriever, build_reranker
 from .compression import ContextCompressor, CompressionPipeline, ExtractiveContextCompressor, RedundancyFilter
+from .context_packing import LongContextPacker, PackedContext, PackingDiagnostics
 from .query import QueryTransformer, build_query_transformer
 from .tracing import RAGTrace, append_trace_jsonl
 from .cache import (
@@ -83,6 +87,7 @@ class RAGEngine:
         flag_unsourced_sentences: bool = False,
         compressor: ContextCompressor | str | None = None,
         query_transformer: QueryTransformer | str | None = None,
+        context_packer: LongContextPacker | None = None,
         trace_enabled: bool = True,
         cache_backend: CacheBackend | None = None,
         cache_config: dict[str, Any] | None = None,
@@ -99,6 +104,7 @@ class RAGEngine:
         self.require_citations = strict_grounding if require_citations is None else require_citations
         self.flag_unsourced_sentences = flag_unsourced_sentences
         self.compressor = _build_compressor(compressor)
+        self.context_packer = _validate_context_packer(context_packer)
         self.query_transformer = (
             build_query_transformer(query_transformer, llm_client=self.llm_client)
             if isinstance(query_transformer, str)
@@ -129,6 +135,7 @@ class RAGEngine:
         first_stage_top_k: int = 30,
         compressor: ContextCompressor | str | None = None,
         query_transformer: QueryTransformer | str | None = None,
+        context_packer: LongContextPacker | None = None,
         **kwargs: Any,
     ) -> "RAGEngine":
         _validate_from_documents_kwargs(kwargs)
@@ -196,6 +203,7 @@ class RAGEngine:
             top_k=top_k,
             compressor=compressor or kwargs.get("compressor"),
             query_transformer=effective_query_transformer,
+            context_packer=context_packer,
             cache_backend=cache_backend,
             cache_config=cache_cfg,
             trace_export_path=kwargs.get("trace_export_path"),
@@ -342,10 +350,26 @@ class RAGEngine:
             if step:
                 step.finish(before_chars=before_chars, after_chars=after_chars, document_count=len(docs))
 
+        docs, packed_context, packing_diagnostics = self._apply_context_packing(docs, trace)
+        if (
+            packing_diagnostics is not None
+            and packing_diagnostics["input_documents"] > 0
+            and packing_diagnostics["selected_documents"] == 0
+        ):
+            warnings.append("context_packing_empty")
         if self.strict_grounding and not docs:
-            return self._strict_no_context_response(query, effective_top_k, trace)
+            return self._strict_no_context_response(
+                query,
+                effective_top_k,
+                trace,
+                context_packing=packing_diagnostics,
+            )
 
-        context = AdvancedRAGPipeline._format_context(docs)
+        context = (
+            packed_context
+            if packed_context is not None
+            else AdvancedRAGPipeline._format_context(docs)
+        )
         prompt = self.answer_prompt.format(context=context, query=query)
         if trace:
             trace.prompt = prompt
@@ -373,7 +397,10 @@ class RAGEngine:
             sources=[Source.from_document(doc) for doc in docs],
             retrieved_documents=docs,
             prompt=prompt,
-            metadata={"top_k": effective_top_k, "strict_grounding": self.strict_grounding, "cache": self.cache_backend.stats().to_dict() if self.cache_backend else None},
+            metadata=self._response_metadata(
+                effective_top_k,
+                context_packing=packing_diagnostics,
+            ),
             citations=validation.citations,
             warnings=warnings,
             grounded_score=validation.grounded_score,
@@ -393,11 +420,85 @@ class RAGEngine:
     def _effective_top_k(self, top_k: int | None) -> int:
         return self.top_k if top_k is None else _validate_top_k(top_k)
 
+    def _apply_context_packing(
+        self,
+        documents: list[Document],
+        trace: RAGTrace | None,
+    ) -> tuple[list[Document], str | None, dict[str, Any] | None]:
+        """Apply the optional generation-boundary context packer once.
+
+        The packer's rendered text is returned separately because formatting
+        the selected documents again would discard custom separators, ordering,
+        truncation, or citation headers already encoded in ``PackedContext``.
+        """
+
+        if self.context_packer is None:
+            return documents, None, None
+
+        step = (
+            trace.start_step(
+                "context_packing",
+                packer=self.context_packer.__class__.__name__,
+                input_documents=len(documents),
+            )
+            if trace
+            else None
+        )
+        try:
+            candidates = tuple(_snapshot_document(document) for document in documents)
+            packed = self.context_packer.pack(candidates)
+            if not isinstance(packed, PackedContext):
+                raise TypeError("context_packer.pack() must return PackedContext")
+            if not isinstance(packed.text, str):
+                raise TypeError("PackedContext.text must be a str")
+            if not isinstance(packed.diagnostics, PackingDiagnostics):
+                raise TypeError("PackedContext.diagnostics must be PackingDiagnostics")
+            if any(not isinstance(document, Document) for document in packed.documents):
+                raise TypeError("PackedContext.documents must contain only Document objects")
+            packed_snapshot = packed.snapshot()
+            packed_documents = [
+                _snapshot_document(document) for document in packed_snapshot.documents
+            ]
+            diagnostics = _packing_diagnostics_to_dict(packed_snapshot.diagnostics)
+        except Exception as exc:
+            if step:
+                step.finish(error=type(exc).__name__)
+            raise
+
+        if trace:
+            trace.metadata["context_packing"] = deepcopy(diagnostics)
+        if step:
+            step.finish(
+                selected_documents=len(packed_documents),
+                context_chars=len(packed_snapshot.text),
+                diagnostics=deepcopy(diagnostics),
+            )
+        return packed_documents, packed_snapshot.text, diagnostics
+
+    def _response_metadata(
+        self,
+        effective_top_k: int,
+        *,
+        context_packing: dict[str, Any] | None,
+        include_cache: bool = True,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "top_k": effective_top_k,
+            "strict_grounding": self.strict_grounding,
+        }
+        if include_cache:
+            metadata["cache"] = self.cache_backend.stats().to_dict() if self.cache_backend else None
+        if context_packing is not None:
+            metadata["context_packing"] = deepcopy(context_packing)
+        return metadata
+
     def _strict_no_context_response(
         self,
         query: str,
         effective_top_k: int,
         trace: RAGTrace | None,
+        *,
+        context_packing: dict[str, Any] | None = None,
     ) -> RAGResponse:
         """Build the single no-context response used by sync and stream APIs."""
 
@@ -412,7 +513,14 @@ class RAGEngine:
         # strict-grounding fallback intentionally reports that no answer was
         # grounded in retrieved evidence.
         validation.grounded_score = 0.0
-        warnings = ["no_relevant_documents", *validation.warnings]
+        warnings = ["no_relevant_documents"]
+        if (
+            context_packing is not None
+            and context_packing["input_documents"] > 0
+            and context_packing["selected_documents"] == 0
+        ):
+            warnings.append("context_packing_empty")
+        warnings.extend(validation.warnings)
         if trace:
             trace.warnings.extend(warning for warning in warnings if warning not in trace.warnings)
         return RAGResponse(
@@ -421,7 +529,11 @@ class RAGEngine:
             sources=[],
             retrieved_documents=[],
             prompt="",
-            metadata={"strict_grounding": True, "top_k": effective_top_k},
+            metadata=self._response_metadata(
+                effective_top_k,
+                context_packing=context_packing,
+                include_cache=False,
+            ),
             citations=validation.citations,
             warnings=warnings,
             grounded_score=validation.grounded_score,
@@ -493,12 +605,28 @@ class RAGEngine:
                 }
             if step:
                 step.finish(before_chars=before_chars, after_chars=after_chars, document_count=len(docs))
+        docs, packed_context, packing_diagnostics = self._apply_context_packing(docs, trace)
+        if (
+            packing_diagnostics is not None
+            and packing_diagnostics["input_documents"] > 0
+            and packing_diagnostics["selected_documents"] == 0
+        ):
+            warnings.append("context_packing_empty")
         if self.strict_grounding and not docs:
-            response = self._strict_no_context_response(query, effective_top_k, trace)
+            response = self._strict_no_context_response(
+                query,
+                effective_top_k,
+                trace,
+                context_packing=packing_diagnostics,
+            )
             yield response.answer
             return response
 
-        context = AdvancedRAGPipeline._format_context(docs)
+        context = (
+            packed_context
+            if packed_context is not None
+            else AdvancedRAGPipeline._format_context(docs)
+        )
         prompt = self.answer_prompt.format(context=context, query=query)
         if trace:
             trace.prompt = prompt
@@ -565,11 +693,10 @@ class RAGEngine:
             sources=[Source.from_document(doc) for doc in docs],
             retrieved_documents=docs,
             prompt=prompt,
-            metadata={
-                "top_k": effective_top_k,
-                "strict_grounding": self.strict_grounding,
-                "cache": self.cache_backend.stats().to_dict() if self.cache_backend else None,
-            },
+            metadata=self._response_metadata(
+                effective_top_k,
+                context_packing=packing_diagnostics,
+            ),
             citations=validation.citations,
             warnings=warnings,
             grounded_score=validation.grounded_score,
@@ -608,6 +735,33 @@ class RAGEngine:
                     merged[key] = doc
         ordered = sorted(merged.values(), key=lambda doc: (doc.score is not None, doc.score or 0.0), reverse=True)
         return ordered[:effective_top_k]
+
+
+def _validate_context_packer(
+    context_packer: LongContextPacker | None,
+) -> LongContextPacker | None:
+    if context_packer is not None and not callable(getattr(context_packer, "pack", None)):
+        raise TypeError("context_packer must provide a callable pack(documents) method")
+    return context_packer
+
+
+def _packing_diagnostics_to_dict(diagnostics: PackingDiagnostics) -> dict[str, Any]:
+    """Return a JSON-safe, stable representation of packing diagnostics."""
+
+    return {
+        "input_documents": diagnostics.input_documents,
+        "unique_documents": diagnostics.unique_documents,
+        "selected_documents": diagnostics.selected_documents,
+        "token_budget": diagnostics.token_budget,
+        "tokens_used": diagnostics.tokens_used,
+        "remaining_tokens": diagnostics.remaining_tokens,
+        "ordering": diagnostics.ordering,
+        "duplicate_count": diagnostics.duplicate_count,
+        "budget_drop_count": diagnostics.budget_drop_count,
+        "dropped": [asdict(item) for item in diagnostics.dropped],
+        "source_usage": [asdict(item) for item in diagnostics.source_usage],
+        "truncated_document_ids": list(diagnostics.truncated_document_ids),
+    }
 
 
 def _build_retriever(

@@ -19,12 +19,12 @@ Cheragh est une boîte à outils Python composable pour construire, évaluer et 
 
 - noyau léger : Python 3.10+, NumPy et Pydantic ;
 - ingestion locale de texte, Markdown, HTML, JSON, CSV, YAML et XML, avec PDF et DOCX en option ;
-- BM25, recherche dense et hybride, filtres metadata, reranking et compression ;
+- BM25, recherche dense et hybride, filtres metadata, reranking, compression et packing long-contexte ;
 - index local inspectable et incrémental, ou adaptateurs FAISS, Chroma et Qdrant ;
 - réponses structurées avec sources, citations, avertissements et trace d'exécution ;
 - configuration YAML/JSON validée, CLI, serveur FastAPI et évaluation ;
 - ACL, isolation tenant/collection et cache sûr par défaut ;
-- catalogue machine-readable de 42 techniques avec statut et limites.
+- catalogue machine-readable de 44 techniques avec statut et limites.
 
 ## Installation
 
@@ -197,7 +197,7 @@ Le paramètre `top_k` suit le même contrat partout : entier strictement positif
 
 `MemoryVectorStore.save()` produit un snapshot local composé de `manifest.json`, `documents.jsonl` et `embeddings.npy`. L'indexation CLI ajoute `index_manifest.json` pour suivre les fichiers, les options de chunking et les mises à jour incrémentales.
 
-L'évaluation retrieval inclut `hit_rate@k`, `mrr`, `precision@k`, `recall@k`, `ndcg@k` et `context_precision@k`. Les API principales sont `evaluate_retrieval(...)`, `RetrievalExample` et `evaluate_pipeline(...)`.
+L'évaluation retrieval inclut `hit_rate@k`, `mrr`, `precision@k`, `recall@k`, `ndcg@k` et `context_precision@k`. L'évaluation de génération couvre aussi le support claim-level, les contradictions et l'alignement citation→preuve via `ClaimEvaluator`, avec un juge sémantique injectable. Les API principales sont `evaluate_retrieval(...)`, `RetrievalExample`, `evaluate_claims(...)` et `evaluate_pipeline(...)`.
 
 ## Techniques et maturité
 
@@ -213,19 +213,22 @@ cheragh techniques show self-rag
 | --- | --- |
 | **Stable** · 6 | RAG naïf, chunking récursif, BM25, dense, hybride, évaluation retrieval |
 | **Bêta** · 12 | chunking sémantique/hiérarchique, reranking/RRF, compression, parent-child, multi-hop, fédéré, conversationnel, SQL, ACL, évaluation génération |
-| **Expérimental** · 24 | HyDE/HyQE/RAG-Fusion, CRAG, Self-RAG, Agentic RAG, RAPTOR, GraphRAG-lite et Community GraphRAG, FLARE, SPLADE, ColBERT/ColPali, Temporal RAG, entraînement retrieval-aware et autres variantes |
+| **Expérimental** · 26 | HyDE/HyQE/RAG-Fusion, CRAG, Self-RAG, Adaptive/Agentic RAG, RAPTOR, GraphRAG-lite et Community GraphRAG, FLARE, packing long-contexte, SPLADE, ColBERT/ColPali, Temporal RAG, évaluation claim-level, entraînement retrieval-aware et autres variantes |
 
 Quelques limites importantes :
 
 - SPLADE, ColBERT et ColPali utilisent des calculs exacts en mémoire, sans index distribué ou ANN multivecteur compressé ;
 - Self-RAG couvre l'orchestration d'inférence, pas l'entraînement avec reflection tokens ;
-- RAPTOR et GraphRAG-lite sont des baselines pédagogiques ; Community GraphRAG reste mono-niveau, sans Leiden hiérarchique ni map-reduce complet ;
+- RAPTOR propose désormais un parcours top-down borné, mais garde un clustering hard greedy et un summarizer injectable ; Community GraphRAG reste mono-niveau, sans Leiden hiérarchique ni map-reduce complet ;
+- FLARE accepte des signaux de confiance token-level, mais conserve un fallback par longueur pour les clients LLM texte-only ; Adaptive-RAG accepte un classifieur appris, tandis que son fallback local reste heuristique ;
+- le packing long-contexte borne exactement le rendu selon le tokenizer injecté, sans constituer à lui seul un long reader entraîné ;
+- l'évaluation claim-level exige un juge NLI/LLM injecté pour détecter sémantiquement paraphrases et contradictions ; le fallback lexical ne le prétend pas ;
 - Agentic RAG exécute une boucle bornée avec des outils explicitement enregistrés ;
 - Temporal RAG exige des métadonnées temporelles fiables et des scores initiaux comparables ;
 - le pipeline d'entraînement prépare le mining, la distillation et des données RAFT, mais ne fournit ni poids, ni optimiseur, ni entraînement distribué ;
 - le multimodal couvre le texte et les images locales, avec CLIP ou un encodeur ColPali optionnel.
 
-Les 42 entrées du catalogue ont ainsi une implémentation ou une baseline bornée et testée ; cela ne signifie pas que toutes les méthodes RAG publiées sont reproduites. Consultez [les architectures v1.2](docs/architectures_v120.md) et [la note de version 1.1](docs/release_v110.md) pour les contrats détaillés.
+Les 44 entrées du catalogue ont ainsi une implémentation ou une baseline bornée et testée ; cela ne signifie pas que toutes les méthodes RAG publiées sont reproduites. Consultez [l'audit et les renforcements v1.3](docs/architectures_v130.md), puis [les architectures v1.2](docs/architectures_v120.md), pour les contrats détaillés.
 
 ## Sécurité et production
 
@@ -244,6 +247,7 @@ Les 42 entrées du catalogue ont ainsi une implémentation ou une baseline born�
 - [Guide de production](docs/production.md)
 - [Architectures RAG](docs/architectures_v05.md) et [architectures avancées](docs/architectures_v06.md)
 - [Structured et Enterprise RAG](docs/enterprise_v07.md)
+- [Audit complet et architectures approfondies — v1.3](docs/architectures_v130.md)
 - [Community GraphRAG, ColPali, Temporal RAG et entraînement — v1.2](docs/architectures_v120.md)
 - [Sécurité et RAG moderne — v1.1](docs/release_v110.md)
 - [Historique des versions](CHANGELOG.md)
