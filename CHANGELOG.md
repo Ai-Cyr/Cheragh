@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+- Implement the four architectures previously marked as planned: Community GraphRAG, ColPali-compatible visual late interaction, Temporal RAG and retrieval-aware training adapters.
+- Add a standalone BM25 retriever and make `retriever.type: bm25` a true sparse-only configuration.
+- Add and expose canonical multi-retriever Reciprocal Rank Fusion.
+- Add direct deterministic tests for every architecture in the 42-technique catalogue.
+- Document the scope and limitations of paper-inspired baselines explicitly.
+
+All 42 catalogue entries now have an available implementation or bounded baseline. The four new architectures remain experimental; this release does not claim exhaustive coverage of every RAG method in the literature.
+
 ## 1.1.0
 
 - Fix tenant and collection authorization so requests cannot grant themselves access.

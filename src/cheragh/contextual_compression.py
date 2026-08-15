@@ -14,6 +14,7 @@ C'est un "filtre LLM" placé entre le retriever et le générateur.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import List
 
 from .base import BaseRetriever, Document, LLMClient, _validate_top_k
@@ -63,6 +64,12 @@ class ContextualCompressionRetriever(BaseRetriever):
     ):
         self.base_retriever = base_retriever
         self.llm_client = llm_client
+        if not isinstance(drop_empty, bool):
+            raise TypeError("drop_empty must be a boolean")
+        if isinstance(min_compressed_length, bool) or not isinstance(min_compressed_length, int):
+            raise TypeError("min_compressed_length must be an integer")
+        if min_compressed_length < 0:
+            raise ValueError("min_compressed_length must be >= 0")
         self.drop_empty = drop_empty
         self.min_compressed_length = min_compressed_length
 
@@ -88,7 +95,7 @@ class ContextualCompressionRetriever(BaseRetriever):
                 Document(
                     content=compressed_content if not is_empty else doc.content,
                     metadata={
-                        **doc.metadata,
+                        **deepcopy(doc.metadata),
                         "original_length": len(doc.content),
                         "compressed_length": len(compressed_content),
                         "was_compressed": not is_empty,

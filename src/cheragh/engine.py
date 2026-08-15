@@ -16,7 +16,7 @@ from .base import (
     _validate_top_k,
 )
 from .citations import extract_citations, validate_citations
-from .hybrid_search import HybridSearchRetriever
+from .hybrid_search import BM25Retriever, HybridSearchRetriever
 from .schema import RAGResponse, Source
 from .ingestion import chunk_documents, ingest_path
 from .pipeline import DEFAULT_ANSWER_PROMPT_FR, AdvancedRAGPipeline
@@ -224,11 +224,17 @@ class RAGEngine:
         config_file = Path(config_path).expanduser().resolve()
         config_dir = config_file.parent
         config = load_config(config_file)
-        embedder = _embedding_from_config(config.get("embedding", {}))
-        llm = _llm_from_config(config.get("generation", {}))
         retriever_cfg = config.get("retriever", {})
         ingestion_cfg = config.get("ingestion", {})
         vectorstore_cfg = config.get("vectorstore", {})
+        retriever_type = str(vectorstore_cfg.get("type") or retriever_cfg.get("type", "hybrid"))
+        embedding_cfg = config.get("embedding", {})
+        embedder = (
+            HashingEmbedding(dimension=int(embedding_cfg.get("dimension", 384)))
+            if retriever_type.lower().replace("_", "-") == "bm25"
+            else _embedding_from_config(embedding_cfg)
+        )
+        llm = _llm_from_config(config.get("generation", {}))
         reranker_cfg = config.get("reranker", {})
         compression_cfg = config.get("compression", {})
         query_cfg = config.get("query", {})
@@ -271,8 +277,10 @@ class RAGEngine:
             docs,
             embedding_model=embedder,
             llm_client=llm,
-            retriever_type=str(vectorstore_cfg.get("type") or retriever_cfg.get("type", "hybrid")),
+            retriever_type=retriever_type,
             alpha=float(retriever_cfg.get("alpha", 0.5)),
+            bm25_k1=float(retriever_cfg.get("bm25_k1", 1.5)),
+            bm25_b=float(retriever_cfg.get("bm25_b", 0.75)),
             top_k=int(retriever_cfg.get("top_k", 5)),
             strict_grounding=bool(config.get("strict_grounding", False)),
             min_score=config.get("min_score"),
@@ -613,6 +621,14 @@ def _build_retriever(
     rt = retriever_type.lower().replace("_", "-")
     filters = kwargs.get("filters")
     tokenizer = _tokenizer_from_config(kwargs.get("tokenizer") or kwargs.get("tokenizer_config"))
+    if rt == "bm25":
+        return BM25Retriever(
+            docs,
+            filters=filters,
+            tokenizer=tokenizer,
+            k1=float(kwargs.get("bm25_k1", 1.5)),
+            b=float(kwargs.get("bm25_b", 0.75)),
+        )
     if rt == "hybrid":
         return HybridSearchRetriever(
             docs,
@@ -672,6 +688,8 @@ def _engine_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 _FROM_DOCUMENTS_KWARGS = {
     "allow_unsafe_pickle",
     "answer_prompt",
+    "bm25_b",
+    "bm25_k1",
     "cache_backend",
     "cache_backend_name",
     "cache_backend_type",

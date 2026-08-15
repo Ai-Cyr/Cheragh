@@ -76,8 +76,10 @@ class ChainOfNoteRetriever(BaseRetriever):
     ):
         self.base_retriever = base_retriever
         self.llm_client = llm_client
+        if not isinstance(drop_not_relevant, bool):
+            raise TypeError("drop_not_relevant must be a boolean")
         self.drop_not_relevant = drop_not_relevant
-        self.fetch_multiplier = max(1, fetch_multiplier)
+        self.fetch_multiplier = _validate_top_k(fetch_multiplier, name="fetch_multiplier")
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
         top_k = _validate_top_k(top_k)

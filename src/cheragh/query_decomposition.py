@@ -58,8 +58,11 @@ class QueryDecompositionRetriever(BaseRetriever):
     ):
         self.base_retriever = base_retriever
         self.llm_client = llm_client
-        self.max_subquestions = max_subquestions
-        self.per_subquestion_top_k = per_subquestion_top_k
+        self.max_subquestions = _validate_top_k(max_subquestions, name="max_subquestions")
+        self.per_subquestion_top_k = _validate_top_k(
+            per_subquestion_top_k,
+            name="per_subquestion_top_k",
+        )
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
         top_k = _validate_top_k(top_k)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cheragh"
-version = "1.1.0"
+version = "1.2.0"
 description = "Composable RAG toolkit for standard Python applications"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,7 @@ litellm = ["litellm>=1.0"]
 rerank = ["sentence-transformers>=2.2"]
 learned-retrieval = ["sentence-transformers>=5.0"]
 multimodal = ["sentence-transformers>=2.2", "Pillow>=10.0"]
+colpali = ["colpali-engine>=0.3", "Pillow>=10.0"]
 raptor = ["scikit-learn>=1.0"]
 bm25 = ["rank-bm25>=0.2.2"]
 config = ["PyYAML>=6.0", "pydantic>=2"]
@@ -92,9 +93,12 @@ follow_imports = "silent"
 files = [
   "src/cheragh/agentic",
   "src/cheragh/catalog",
+  "src/cheragh/community_graph",
   "src/cheragh/multimodal",
   "src/cheragh/retrieval/learned.py",
   "src/cheragh/self_rag",
+  "src/cheragh/temporal",
+  "src/cheragh/training",
 ]
 
 [[tool.mypy.overrides]]

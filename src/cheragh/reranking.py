@@ -8,7 +8,9 @@ pairs with a stronger scoring model.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass
+import hashlib
 from typing import Iterable, List, Sequence
 
 from .base import BaseRetriever, Document, _tokenize, _validate_top_k
@@ -98,28 +100,74 @@ class CohereReranker(BaseReranker):
 class ReciprocalRankFusionReranker(BaseReranker):
     """Fuse several already-ranked document lists with RRF.
 
-    This class can be used directly via ``fuse``. The ``rerank`` method keeps the
-    input order and mainly exists to satisfy the common interface.
+    ``rerank`` applies the single-list RRF prior and ``fuse`` combines multiple
+    independently ranked lists.  For retrieval from several sources, prefer
+    :class:`ReciprocalRankFusionRetriever`.
     """
 
     def __init__(self, k: int = 60):
-        self.k = k
+        self.k = _validate_top_k(k, name="k")
 
     def rerank(self, query: str, documents: Sequence[Document], top_k: int = 5) -> list[Document]:
         top_k = _validate_top_k(top_k)
-        return list(documents)[:top_k]
+        return self.fuse([documents], top_k=top_k)
 
     def fuse(self, ranked_lists: Iterable[Sequence[Document]], top_k: int = 5) -> list[Document]:
         top_k = _validate_top_k(top_k)
         scores: dict[str, float] = {}
         docs_by_key: dict[str, Document] = {}
-        for ranked in ranked_lists:
+        source_ranks: dict[str, list[tuple[int, int]]] = {}
+        for source_index, ranked in enumerate(ranked_lists):
+            seen_in_source: set[str] = set()
             for rank, doc in enumerate(ranked, start=1):
-                key = doc.doc_id or doc.content
+                key = _rrf_document_key(doc)
+                if key in seen_in_source:
+                    continue
+                seen_in_source.add(key)
                 scores[key] = scores.get(key, 0.0) + 1.0 / (self.k + rank)
                 docs_by_key.setdefault(key, doc)
+                source_ranks.setdefault(key, []).append((source_index, rank))
         ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:top_k]
-        return [_copy_with_rerank_score(docs_by_key[key], score) for key, score in ordered]
+        return [
+            _copy_with_rerank_score(
+                docs_by_key[key],
+                score,
+                extra_metadata={
+                    "rrf_sources": len(source_ranks[key]),
+                    "rrf_source_ranks": [
+                        {"source": source, "rank": rank}
+                        for source, rank in source_ranks[key]
+                    ],
+                },
+            )
+            for key, score in ordered
+        ]
+
+
+class ReciprocalRankFusionRetriever(BaseRetriever):
+    """Retrieve from several sources and fuse their ranks with canonical RRF."""
+
+    def __init__(
+        self,
+        retrievers: Sequence[BaseRetriever],
+        *,
+        candidate_top_k: int = 20,
+        k: int = 60,
+    ):
+        if not retrievers:
+            raise ValueError("ReciprocalRankFusionRetriever requires at least one retriever")
+        self.retrievers = tuple(retrievers)
+        self.candidate_top_k = _validate_top_k(candidate_top_k, name="candidate_top_k")
+        self.fuser = ReciprocalRankFusionReranker(k=k)
+
+    def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
+        depth = max(top_k, self.candidate_top_k)
+        ranked_lists = [retriever.retrieve(query, top_k=depth) for retriever in self.retrievers]
+        results = self.fuser.fuse(ranked_lists, top_k=top_k)
+        for document in results:
+            document.metadata["retrieval_method"] = "reciprocal-rank-fusion"
+        return results
 
 
 class RerankingRetriever(BaseRetriever):
@@ -138,7 +186,7 @@ class RerankingRetriever(BaseRetriever):
     ):
         self.base_retriever = base_retriever
         self.reranker = reranker or CrossEncoderReranker(cross_encoder_model)
-        self.first_stage_top_k = first_stage_top_k
+        self.first_stage_top_k = _validate_top_k(first_stage_top_k, name="first_stage_top_k")
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
         top_k = _validate_top_k(top_k)
@@ -166,10 +214,29 @@ def build_reranker(provider: str = "cross-encoder", model: str | None = None, **
     raise ValueError(f"Unsupported reranker provider: {provider}")
 
 
-def _copy_with_rerank_score(doc: Document, score: float) -> Document:
+def _rrf_document_key(doc: Document) -> str:
+    if doc.doc_id is not None and not isinstance(doc.doc_id, str):
+        raise TypeError("RRF document ids must be strings or None")
+    if isinstance(doc.doc_id, str) and doc.doc_id.strip():
+        return f"id::{doc.doc_id}"
+    digest = hashlib.sha256(doc.content.encode("utf-8")).hexdigest()
+    return f"content::{digest}"
+
+
+def _copy_with_rerank_score(
+    doc: Document,
+    score: float,
+    *,
+    extra_metadata: dict[str, object] | None = None,
+) -> Document:
     return Document(
         content=doc.content,
-        metadata={**doc.metadata, "first_stage_score": doc.score, "rerank_score": score},
+        metadata={
+            **deepcopy(doc.metadata),
+            "first_stage_score": doc.score,
+            "rerank_score": score,
+            **deepcopy(extra_metadata or {}),
+        },
         doc_id=doc.doc_id,
         score=score,
     )

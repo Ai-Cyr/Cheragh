@@ -7,17 +7,16 @@ from cheragh.cli.main import main
 
 
 class V110TechniqueCatalogTests(unittest.TestCase):
-    def test_catalog_distinguishes_available_and_planned_techniques(self):
+    def test_catalog_distinguishes_stable_and_experimental_techniques(self):
         self.assertTrue(get_technique("self-rag").available)
-        self.assertEqual(get_technique("community-graphrag").status, TechniqueStatus.PLANNED)
-        self.assertFalse(get_technique("community-graphrag").available)
+        self.assertEqual(get_technique("community-graphrag").status, TechniqueStatus.EXPERIMENTAL)
+        self.assertTrue(get_technique("community-graphrag").available)
 
     def test_catalog_filters_are_machine_readable(self):
         planned = list_techniques(status="planned")
-        self.assertGreaterEqual(len(planned), 1)
-        self.assertTrue(all(item.to_dict()["status"] == "planned" for item in planned))
+        self.assertEqual(planned, [])
         multimodal = list_techniques(family="multimodal", available=True)
-        self.assertEqual([item.id for item in multimodal], ["multimodal-rag"])
+        self.assertEqual([item.id for item in multimodal], ["multimodal-rag", "colpali"])
 
     def test_unknown_technique_is_rejected(self):
         with self.assertRaises(KeyError):

@@ -14,7 +14,7 @@ class StrictBaseModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
 
 
-_RETRIEVER_TYPES = {"hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}
+_RETRIEVER_TYPES = {"bm25", "hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}
 _VECTORSTORE_TYPES = {"hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}
 _EMBEDDING_PROVIDERS = {
     "hashing",
@@ -119,6 +119,8 @@ class RetrieverConfig(StrictBaseModel):
     type: str = "hybrid"
     top_k: int = Field(default=5, ge=1, le=1_000)
     alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    bm25_k1: float = Field(default=1.5, gt=0.0)
+    bm25_b: float = Field(default=0.75, ge=0.0, le=1.0)
     filters: dict[str, Any] = Field(default_factory=dict)
     tokenizer: dict[str, Any] = Field(default_factory=dict)
 

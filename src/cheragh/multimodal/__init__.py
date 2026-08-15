@@ -15,14 +15,24 @@ from .retrieval import (
     MultimodalRAGEngine,
     MultimodalRetriever,
 )
+from .colpali import (
+    CallableVisualLateInteractionEncoder,
+    ColPaliEngineAdapter,
+    ColPaliRetriever,
+    VisualLateInteractionEncoder,
+)
 
 __all__ = [
     "CLIPMultimodalEmbedding",
     "CallableMultimodalEmbedding",
+    "CallableVisualLateInteractionEncoder",
     "Modality",
     "MultimodalDocument",
     "MultimodalEmbeddingModel",
     "MultimodalQuery",
     "MultimodalRAGEngine",
     "MultimodalRetriever",
+    "ColPaliEngineAdapter",
+    "ColPaliRetriever",
+    "VisualLateInteractionEncoder",
 ]
