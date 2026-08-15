@@ -65,8 +65,8 @@ class StepBackRetriever(BaseRetriever):
     ):
         self.base_retriever = base_retriever
         self.llm_client = llm_client
-        self.n_original = n_original
-        self.n_stepback = n_stepback
+        self.n_original = _validate_top_k(n_original, name="n_original")
+        self.n_stepback = _validate_top_k(n_stepback, name="n_stepback")
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
         top_k = _validate_top_k(top_k)

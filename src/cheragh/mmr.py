@@ -33,7 +33,7 @@ class MMRRetriever(BaseRetriever):
         self.documents = documents
         self.base_retriever = base_retriever
         self.lambda_mult = lambda_mult
-        self.fetch_k = fetch_k
+        self.fetch_k = _validate_top_k(fetch_k, name="fetch_k")
         self._cache_path = cache_path
         self._allow_unsafe_pickle = allow_unsafe_pickle
 

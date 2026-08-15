@@ -25,7 +25,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import List, Optional
 
-from .base import BaseRetriever, Document, LLMClient, _validate_top_k
+from .base import BaseRetriever, Document, LLMClient, _snapshot_document, _validate_top_k
 
 
 class GateDecision(str, Enum):
@@ -97,6 +97,8 @@ class AdaptiveRetriever(BaseRetriever):
     ):
         self.base_retriever = base_retriever
         self.llm_client = llm_client
+        if not isinstance(allow_rephrase, bool):
+            raise TypeError("allow_rephrase must be a boolean")
         self.allow_rephrase = allow_rephrase
         # État de la dernière décision (utile pour logs/observabilité)
         self.last_decision: Optional[GateDecision] = None
@@ -116,7 +118,10 @@ class AdaptiveRetriever(BaseRetriever):
             used_query = self._rephrase(query)
 
         self.last_used_query = used_query
-        docs = self.base_retriever.retrieve(used_query, top_k=top_k)
+        docs = [
+            _snapshot_document(document)
+            for document in self.base_retriever.retrieve(used_query, top_k=top_k)
+        ]
 
         # Traçabilité
         for d in docs:

@@ -50,9 +50,10 @@ Les intégrations restent optionnelles :
 | `openai`, `cohere`, `voyage`, `anthropic`, `litellm` | fournisseurs d'embeddings ou de génération |
 | `pdf`, `docx`, `config` | chargeurs documentaires et YAML |
 | `faiss`, `chroma`, `qdrant`, `redis` | stockage vectoriel et cache |
-| `learned-retrieval`, `multimodal`, `raptor`, `bm25` | techniques spécialisées |
+| `learned-retrieval`, `multimodal`, `raptor`, `bm25` | techniques spécialisées légères ou intermédiaires |
+| `colpali` | modèle ColPali officiel et retrieval visuel multi-vecteur |
 | `fastapi` | serveur HTTP avec Uvicorn |
-| `all` | toutes les intégrations d'exécution, hors outils de développement |
+| `all` | intégrations courantes, hors ColPali lourd et outils de développement |
 
 Exemple :
 
@@ -212,18 +213,19 @@ cheragh techniques show self-rag
 | --- | --- |
 | **Stable** · 6 | RAG naïf, chunking récursif, BM25, dense, hybride, évaluation retrieval |
 | **Bêta** · 12 | chunking sémantique/hiérarchique, reranking/RRF, compression, parent-child, multi-hop, fédéré, conversationnel, SQL, ACL, évaluation génération |
-| **Expérimental** · 20 | HyDE/HyQE/RAG-Fusion, CRAG, Self-RAG, Agentic RAG, RAPTOR, GraphRAG-lite, FLARE, SPLADE, ColBERT, multimodal et autres variantes |
-| **Planifié** · 4 | Community GraphRAG, ColPali, Temporal RAG, entraînement retrieval-aware |
+| **Expérimental** · 24 | HyDE/HyQE/RAG-Fusion, CRAG, Self-RAG, Agentic RAG, RAPTOR, GraphRAG-lite et Community GraphRAG, FLARE, SPLADE, ColBERT/ColPali, Temporal RAG, entraînement retrieval-aware et autres variantes |
 
 Quelques limites importantes :
 
-- SPLADE et ColBERT utilisent des calculs exacts en mémoire, sans index distribué ou ANN multivecteur compressé ;
+- SPLADE, ColBERT et ColPali utilisent des calculs exacts en mémoire, sans index distribué ou ANN multivecteur compressé ;
 - Self-RAG couvre l'orchestration d'inférence, pas l'entraînement avec reflection tokens ;
-- RAPTOR et GraphRAG-lite sont des baselines pédagogiques, pas des implémentations complètes des publications ;
+- RAPTOR et GraphRAG-lite sont des baselines pédagogiques ; Community GraphRAG reste mono-niveau, sans Leiden hiérarchique ni map-reduce complet ;
 - Agentic RAG exécute une boucle bornée avec des outils explicitement enregistrés ;
-- le multimodal actuel couvre le texte et les images locales, avec CLIP en option.
+- Temporal RAG exige des métadonnées temporelles fiables et des scores initiaux comparables ;
+- le pipeline d'entraînement prépare le mining, la distillation et des données RAFT, mais ne fournit ni poids, ni optimiseur, ni entraînement distribué ;
+- le multimodal couvre le texte et les images locales, avec CLIP ou un encodeur ColPali optionnel.
 
-Consultez [la note de version 1.1](docs/release_v110.md) pour les contrats détaillés.
+Les 42 entrées du catalogue ont ainsi une implémentation ou une baseline bornée et testée ; cela ne signifie pas que toutes les méthodes RAG publiées sont reproduites. Consultez [les architectures v1.2](docs/architectures_v120.md) et [la note de version 1.1](docs/release_v110.md) pour les contrats détaillés.
 
 ## Sécurité et production
 
@@ -242,6 +244,7 @@ Consultez [la note de version 1.1](docs/release_v110.md) pour les contrats déta
 - [Guide de production](docs/production.md)
 - [Architectures RAG](docs/architectures_v05.md) et [architectures avancées](docs/architectures_v06.md)
 - [Structured et Enterprise RAG](docs/enterprise_v07.md)
+- [Community GraphRAG, ColPali, Temporal RAG et entraînement — v1.2](docs/architectures_v120.md)
 - [Sécurité et RAG moderne — v1.1](docs/release_v110.md)
 - [Historique des versions](CHANGELOG.md)
 

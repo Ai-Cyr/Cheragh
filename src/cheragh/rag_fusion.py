@@ -61,9 +61,9 @@ class RAGFusionRetriever(BaseRetriever):
     ):
         self.base_retriever = base_retriever
         self.llm_client = llm_client
-        self.n_queries = n_queries
-        self.rrf_k = rrf_k
-        self.per_query_top_k = per_query_top_k
+        self.n_queries = _validate_top_k(n_queries, name="n_queries")
+        self.rrf_k = _validate_top_k(rrf_k, name="rrf_k")
+        self.per_query_top_k = _validate_top_k(per_query_top_k, name="per_query_top_k")
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
         top_k = _validate_top_k(top_k)

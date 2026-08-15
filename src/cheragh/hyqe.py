@@ -47,7 +47,12 @@ class HyQERetriever(BaseRetriever):
         self.documents = documents
         self.embedding_model = embedding_model
         self.llm_client = llm_client
-        self.n_questions_per_doc = n_questions_per_doc
+        self.n_questions_per_doc = _validate_top_k(
+            n_questions_per_doc,
+            name="n_questions_per_doc",
+        )
+        if not isinstance(include_original_content, bool):
+            raise TypeError("include_original_content must be a boolean")
         self.include_original_content = include_original_content
         self._cache_path = cache_path
         self._allow_unsafe_pickle = allow_unsafe_pickle

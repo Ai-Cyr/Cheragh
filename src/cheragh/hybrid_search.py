@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from copy import deepcopy
+from numbers import Real
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence
 
 from .base import (
@@ -154,6 +156,69 @@ class HybridSearchRetriever(BaseRetriever):
         return self.tokenizer.tokenize(text)
 
 
+class BM25Retriever(BaseRetriever):
+    """Dependency-light standalone BM25 retriever.
+
+    Unlike ``HybridSearchRetriever(alpha=0)``, this class does not construct or
+    invoke an embedding model.  It is therefore the canonical sparse-only
+    retriever exposed by the catalogue and configuration factory.
+    """
+
+    def __init__(
+        self,
+        documents: Sequence[Document],
+        *,
+        filters: dict[str, Any] | None = None,
+        tokenizer: RetrievalTokenizer | None = None,
+        k1: float = 1.5,
+        b: float = 0.75,
+    ):
+        if isinstance(k1, bool) or not isinstance(k1, Real):
+            raise TypeError("k1 must be a number")
+        if not math.isfinite(float(k1)) or k1 <= 0:
+            raise ValueError("k1 must be a finite number > 0")
+        if isinstance(b, bool) or not isinstance(b, Real):
+            raise TypeError("b must be a number")
+        if not math.isfinite(float(b)) or not 0.0 <= b <= 1.0:
+            raise ValueError("b must be a finite number in [0, 1]")
+        self.documents = _snapshot_documents(documents)
+        self.filters = filters
+        self.tokenizer = tokenizer or RetrievalTokenizer()
+        self.k1 = float(k1)
+        self.b = float(b)
+        self._tokenized_corpus = [self.tokenizer.tokenize(document.content) for document in self.documents]
+        self.bm25 = _build_bm25(self._tokenized_corpus, k1=self.k1, b=self.b)
+
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
+    ) -> list[Document]:
+        top_k = _validate_top_k(top_k)
+        if not self.documents:
+            return []
+        effective_filters = _merge_filters(self.filters, filters)
+        candidate_indices = [
+            index
+            for index, document in enumerate(self.documents)
+            if metadata_matches(document.metadata, effective_filters)
+        ]
+        if not candidate_indices:
+            return []
+        scores = self.bm25.get_scores(self.tokenizer.tokenize(query))
+        order = sorted(candidate_indices, key=lambda index: (-float(scores[index]), index))[:top_k]
+        return [
+            Document(
+                content=self.documents[index].content,
+                metadata={**deepcopy(self.documents[index].metadata), "bm25_score": float(scores[index])},
+                doc_id=self.documents[index].doc_id,
+                score=float(scores[index]),
+            )
+            for index in order
+        ]
+
+
 class _SimpleBM25:
     """Minimal BM25Okapi-compatible scorer used as a dependency-free fallback."""
 
@@ -189,13 +254,20 @@ class _SimpleBM25:
         return scores
 
 
-def _build_bm25(tokenized_corpus: Sequence[Sequence[str]]):
+def _build_bm25(
+    tokenized_corpus: Sequence[Sequence[str]],
+    *,
+    k1: float = 1.5,
+    b: float = 0.75,
+):
+    if not tokenized_corpus:
+        return _SimpleBM25(tokenized_corpus, k1=k1, b=b)
     try:  # pragma: no cover - depends on optional dependency
         from rank_bm25 import BM25Okapi
 
-        return BM25Okapi(tokenized_corpus)
+        return BM25Okapi(tokenized_corpus, k1=k1, b=b)
     except ImportError:
-        return _SimpleBM25(tokenized_corpus)
+        return _SimpleBM25(tokenized_corpus, k1=k1, b=b)
 
 
 def _merge_filters(base: Optional[dict[str, Any]], extra: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:

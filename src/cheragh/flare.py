@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 DRAFT_NEXT_PROMPT_FR = """Tu rédiges une réponse à une question, phrase par phrase.
@@ -84,8 +84,12 @@ class FLAREPipeline:
     ):
         self.retriever = retriever
         self.llm_client = llm_client
-        self.max_iterations = max_iterations
-        self.retrieval_top_k = retrieval_top_k
+        self.max_iterations = _validate_top_k(max_iterations, name="max_iterations")
+        self.retrieval_top_k = _validate_top_k(retrieval_top_k, name="retrieval_top_k")
+        if isinstance(min_draft_length, bool) or not isinstance(min_draft_length, int):
+            raise TypeError("min_draft_length must be an integer")
+        if min_draft_length < 0:
+            raise ValueError("min_draft_length must be >= 0")
         self.min_draft_length = min_draft_length
 
     def run(self, query: str) -> Dict:

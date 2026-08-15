@@ -76,6 +76,12 @@ if TYPE_CHECKING:
     from .compression import ContextCompressor as ContextCompressor
     from .compression import ExtractiveContextCompressor as ExtractiveContextCompressor
     from .compression import RedundancyFilter as RedundancyFilter
+    from .community_graph import Community as Community
+    from .community_graph import CommunityGraphRAGEngine as CommunityGraphRAGEngine
+    from .community_graph import CommunityReport as CommunityReport
+    from .community_graph import CommunitySummarizer as CommunitySummarizer
+    from .community_graph import DeterministicCommunitySummarizer as DeterministicCommunitySummarizer
+    from .community_graph import detect_communities as detect_communities
     from .contextual_compression import ContextualCompressionRetriever as ContextualCompressionRetriever
     from .conversation import ConversationTurn as ConversationTurn
     from .conversation import ConversationalRAGEngine as ConversationalRAGEngine
@@ -116,6 +122,7 @@ if TYPE_CHECKING:
     from .graph import GraphRAGRetriever as GraphRAGRetriever
     from .graph import KnowledgeGraph as KnowledgeGraph
     from .graph import KnowledgeTriple as KnowledgeTriple
+    from .hybrid_search import BM25Retriever as BM25Retriever
     from .hybrid_search import HybridSearchRetriever as HybridSearchRetriever
     from .hyde import HyDERetriever as HyDERetriever
     from .hyqe import HyQERetriever as HyQERetriever
@@ -155,13 +162,17 @@ if TYPE_CHECKING:
     from .multihop import MultiHopRAGResult as MultiHopRAGResult
     from .multihop import RuleBasedQueryDecomposer as RuleBasedQueryDecomposer
     from .multimodal import CallableMultimodalEmbedding as CallableMultimodalEmbedding
+    from .multimodal import CallableVisualLateInteractionEncoder as CallableVisualLateInteractionEncoder
     from .multimodal import CLIPMultimodalEmbedding as CLIPMultimodalEmbedding
+    from .multimodal import ColPaliEngineAdapter as ColPaliEngineAdapter
+    from .multimodal import ColPaliRetriever as ColPaliRetriever
     from .multimodal import Modality as Modality
     from .multimodal import MultimodalDocument as MultimodalDocument
     from .multimodal import MultimodalEmbeddingModel as MultimodalEmbeddingModel
     from .multimodal import MultimodalQuery as MultimodalQuery
     from .multimodal import MultimodalRAGEngine as MultimodalRAGEngine
     from .multimodal import MultimodalRetriever as MultimodalRetriever
+    from .multimodal import VisualLateInteractionEncoder as VisualLateInteractionEncoder
     from .parent_document import ParentDocumentRetriever as ParentDocumentRetriever
     from .pipeline import AdvancedRAGPipeline as AdvancedRAGPipeline
     from .presets import production_hybrid_rag as production_hybrid_rag
@@ -185,6 +196,7 @@ if TYPE_CHECKING:
     from .reranking import CrossEncoderReranker as CrossEncoderReranker
     from .reranking import KeywordOverlapReranker as KeywordOverlapReranker
     from .reranking import ReciprocalRankFusionReranker as ReciprocalRankFusionReranker
+    from .reranking import ReciprocalRankFusionRetriever as ReciprocalRankFusionRetriever
     from .reranking import RerankingConfig as RerankingConfig
     from .reranking import RerankingRetriever as RerankingRetriever
     from .reranking import build_reranker as build_reranker
@@ -243,12 +255,27 @@ if TYPE_CHECKING:
     from .tenancy import MultiTenantRAGEngine as MultiTenantRAGEngine
     from .tenancy import TenantConfig as TenantConfig
     from .tenancy import TenantRegistry as TenantRegistry
+    from .temporal import ConflictResolution as ConflictResolution
+    from .temporal import MissingTimestampPolicy as MissingTimestampPolicy
+    from .temporal import TemporalDocument as TemporalDocument
+    from .temporal import TemporalRetriever as TemporalRetriever
+    from .temporal import temporal_metadata as temporal_metadata
+    from .temporal import version_metadata as version_metadata
     from .tokenization import RetrievalTokenizer as RetrievalTokenizer
     from .tokenization import tokenize as tokenize
     from .tracing import RAGTrace as RAGTrace
     from .tracing import RAGTraceStep as RAGTraceStep
     from .tracing import append_trace_jsonl as append_trace_jsonl
     from .tracing import estimate_tokens as estimate_tokens
+    from .training import DistilledRetrievalExample as DistilledRetrievalExample
+    from .training import HardNegativeMiner as HardNegativeMiner
+    from .training import RAFTDatasetBuilder as RAFTDatasetBuilder
+    from .training import RAFTTrainingRecord as RAFTTrainingRecord
+    from .training import RetrievalTrainerProtocol as RetrievalTrainerProtocol
+    from .training import RetrievalTrainingExample as RetrievalTrainingExample
+    from .training import RetrievalTrainingPipeline as RetrievalTrainingPipeline
+    from .training import TeacherScoreDistiller as TeacherScoreDistiller
+    from .training import contrastive_retrieval_loss as contrastive_retrieval_loss
     from .vectorstores import ChromaRetriever as ChromaRetriever
     from .vectorstores import ChromaVectorStore as ChromaVectorStore
     from .vectorstores import FaissRetriever as FaissRetriever
@@ -265,7 +292,7 @@ if TYPE_CHECKING:
     from .workflow import TransformQueryNode as TransformQueryNode
     from .workflow import WorkflowResult as WorkflowResult
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 _LAZY_EXPORTS = {
     "embedder_fingerprint": (".cache", "embedder_fingerprint"),
@@ -321,6 +348,7 @@ _LAZY_EXPORTS = {
     "evaluate_generation": (".evaluation", "evaluate_generation"),
     "evaluate_pipeline": (".evaluation", "evaluate_pipeline"),
     "evaluate_retrieval": (".evaluation", "evaluate_retrieval"),
+    "BM25Retriever": (".hybrid_search", "BM25Retriever"),
     "HybridSearchRetriever": (".hybrid_search", "HybridSearchRetriever"),
     "RetrievalTokenizer": (".tokenization", "RetrievalTokenizer"),
     "tokenize": (".tokenization", "tokenize"),
@@ -365,6 +393,7 @@ _LAZY_EXPORTS = {
     "CrossEncoderReranker": (".reranking", "CrossEncoderReranker"),
     "KeywordOverlapReranker": (".reranking", "KeywordOverlapReranker"),
     "ReciprocalRankFusionReranker": (".reranking", "ReciprocalRankFusionReranker"),
+    "ReciprocalRankFusionRetriever": (".reranking", "ReciprocalRankFusionRetriever"),
     "RerankingConfig": (".reranking", "RerankingConfig"),
     "RerankingRetriever": (".reranking", "RerankingRetriever"),
     "build_reranker": (".reranking", "build_reranker"),
@@ -389,9 +418,13 @@ _LAZY_EXPORTS = {
     "MultimodalQuery": (".multimodal", "MultimodalQuery"),
     "MultimodalEmbeddingModel": (".multimodal", "MultimodalEmbeddingModel"),
     "CallableMultimodalEmbedding": (".multimodal", "CallableMultimodalEmbedding"),
+    "CallableVisualLateInteractionEncoder": (".multimodal", "CallableVisualLateInteractionEncoder"),
     "CLIPMultimodalEmbedding": (".multimodal", "CLIPMultimodalEmbedding"),
+    "ColPaliEngineAdapter": (".multimodal", "ColPaliEngineAdapter"),
+    "ColPaliRetriever": (".multimodal", "ColPaliRetriever"),
     "MultimodalRetriever": (".multimodal", "MultimodalRetriever"),
     "MultimodalRAGEngine": (".multimodal", "MultimodalRAGEngine"),
+    "VisualLateInteractionEncoder": (".multimodal", "VisualLateInteractionEncoder"),
     "TechniqueFamily": (".catalog", "TechniqueFamily"),
     "TechniqueStatus": (".catalog", "TechniqueStatus"),
     "TechniqueSpec": (".catalog", "TechniqueSpec"),
@@ -425,6 +458,12 @@ _LAZY_EXPORTS = {
     "RetrievalToolAdapter": (".agentic", "RetrievalToolAdapter"),
     "ScriptedPlanner": (".agentic", "ScriptedPlanner"),
     "LLMJSONPlanner": (".agentic", "LLMJSONPlanner"),
+    "Community": (".community_graph", "Community"),
+    "CommunityGraphRAGEngine": (".community_graph", "CommunityGraphRAGEngine"),
+    "CommunityReport": (".community_graph", "CommunityReport"),
+    "CommunitySummarizer": (".community_graph", "CommunitySummarizer"),
+    "DeterministicCommunitySummarizer": (".community_graph", "DeterministicCommunitySummarizer"),
+    "detect_communities": (".community_graph", "detect_communities"),
 
     "ParentChildIndex": (".retrieval", "ParentChildIndex"),
     "ParentChildRetriever": (".retrieval", "ParentChildRetriever"),
@@ -495,6 +534,12 @@ _LAZY_EXPORTS = {
     "CollectionBinding": (".tenancy", "CollectionBinding"),
     "TenantRegistry": (".tenancy", "TenantRegistry"),
     "MultiTenantRAGEngine": (".tenancy", "MultiTenantRAGEngine"),
+    "ConflictResolution": (".temporal", "ConflictResolution"),
+    "MissingTimestampPolicy": (".temporal", "MissingTimestampPolicy"),
+    "TemporalDocument": (".temporal", "TemporalDocument"),
+    "TemporalRetriever": (".temporal", "TemporalRetriever"),
+    "temporal_metadata": (".temporal", "temporal_metadata"),
+    "version_metadata": (".temporal", "version_metadata"),
     "FeedbackRecord": (".feedback", "FeedbackRecord"),
     "FeedbackSummary": (".feedback", "FeedbackSummary"),
     "InMemoryFeedbackStore": (".feedback", "InMemoryFeedbackStore"),
@@ -510,6 +555,15 @@ _LAZY_EXPORTS = {
     "vector_rag": (".presets", "vector_rag"),
     "strict_rag": (".presets", "strict_rag"),
     "GateDecision": (".adaptive", "GateDecision"),
+    "DistilledRetrievalExample": (".training", "DistilledRetrievalExample"),
+    "HardNegativeMiner": (".training", "HardNegativeMiner"),
+    "RAFTDatasetBuilder": (".training", "RAFTDatasetBuilder"),
+    "RAFTTrainingRecord": (".training", "RAFTTrainingRecord"),
+    "RetrievalTrainerProtocol": (".training", "RetrievalTrainerProtocol"),
+    "RetrievalTrainingExample": (".training", "RetrievalTrainingExample"),
+    "RetrievalTrainingPipeline": (".training", "RetrievalTrainingPipeline"),
+    "TeacherScoreDistiller": (".training", "TeacherScoreDistiller"),
+    "contrastive_retrieval_loss": (".training", "contrastive_retrieval_loss"),
 }
 
 
