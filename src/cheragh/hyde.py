@@ -11,7 +11,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from .base import BaseRetriever, Document, EmbeddingModel, LLMClient, cosine_similarity
+from .base import BaseRetriever, Document, EmbeddingModel, LLMClient, _validate_top_k, cosine_similarity
 from .cache import hash_documents, embedder_fingerprint, load_cache, save_cache
 
 
@@ -54,6 +54,7 @@ class HyDERetriever(BaseRetriever):
 
     # ------------------------------------------------------------------ #
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         prompt = self.prompt_template.format(query=query)
         hypotheses = [self.llm_client.generate(prompt) for _ in range(self.n_hypotheses)]
 

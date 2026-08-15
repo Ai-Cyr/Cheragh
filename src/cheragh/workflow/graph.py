@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 
@@ -137,7 +138,21 @@ class RAGWorkflow:
             return component.run(state)
         if callable(component):
             try:
+                signature = inspect.signature(component)
+            except (TypeError, ValueError):
+                # Some extension callables do not expose a signature. Preserve
+                # the documented state-dict convention and execute only once.
                 return component(state)
+            try:
+                signature.bind(state)
             except TypeError:
+                try:
+                    signature.bind(**state)
+                except TypeError as exc:
+                    raise TypeError(
+                        f"Workflow component {component!r} accepts neither a state mapping "
+                        "nor the available state keys"
+                    ) from exc
                 return component(**state)
+            return component(state)
         raise TypeError(f"Workflow component {component!r} is not executable")

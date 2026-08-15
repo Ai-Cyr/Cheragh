@@ -15,47 +15,9 @@ import re
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..base import Document, ExtractiveLLMClient, LLMClient
+from ..base import Document, ExtractiveLLMClient, LLMClient, _validate_top_k
+from ..schema import RAGResponse, Source
 from ..tracing import RAGTrace
-
-
-@dataclass
-class Source:
-    """Source returned with a structured RAG answer."""
-
-    doc_id: str | None
-    score: float | None
-    preview: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class RAGResponse:
-    """Lightweight response compatible with the high-level RAG response shape."""
-
-    query: str
-    answer: str
-    sources: list[Source]
-    retrieved_documents: list[Document]
-    prompt: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-    citations: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    grounded_score: float = 1.0
-    trace: RAGTrace | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        data = {
-            "query": self.query,
-            "answer": self.answer,
-            "sources": [source.__dict__ for source in self.sources],
-            "metadata": self.metadata,
-            "warnings": self.warnings,
-            "grounded_score": self.grounded_score,
-        }
-        if self.trace is not None:
-            data["trace"] = self.trace.to_dict(include_prompt=False)
-        return data
 
 
 @dataclass
@@ -113,6 +75,18 @@ def _cell(value: Any) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
+def _resolve_query(query: str | None, question: str | None) -> str:
+    if query is None:
+        query = question
+    elif question is not None and question != query:
+        raise ValueError("query and question must match when both are provided")
+    if query is None:
+        raise TypeError("ask() missing required argument: 'query'")
+    if not isinstance(query, str):
+        raise TypeError("query must be a string")
+    return query
+
+
 class SQLRAGEngine:
     """Question-answering engine over a read-only SQL database.
 
@@ -142,6 +116,7 @@ class SQLRAGEngine:
         trace_enabled: bool = True,
         max_sql_steps: int = 100_000,
     ):
+        max_rows = _validate_top_k(max_rows, name="max_rows")
         if connection is None:
             db = ":memory:" if database is None else str(database)
             if read_only and db != ":memory:":
@@ -323,29 +298,74 @@ class SQLRAGEngine:
         finally:
             self.connection.set_progress_handler(None, 0)
 
-    def ask(self, question: str, use_llm_sql: bool = False, synthesize: bool = True, **kwargs: Any) -> RAGResponse:
-        trace = RAGTrace() if self.trace_enabled else None
+    def ask(
+        self,
+        query: str | None = None,
+        use_llm_sql: bool = False,
+        synthesize: bool = True,
+        *,
+        question: str | None = None,
+        **generate_kwargs: Any,
+    ) -> RAGResponse:
+        """Answer a structured query.
+
+        ``query`` is the canonical argument name shared by the other RAG
+        engines. ``question`` remains as a keyword-only compatibility alias.
+        """
+
+        query = _resolve_query(query, question)
+        trace = RAGTrace(query=query) if self.trace_enabled else None
         step = trace.start_step("sql_generation") if trace else None
-        generated = self.generate_sql(question, use_llm=use_llm_sql)
+        generated = self.generate_sql(query, use_llm=use_llm_sql)
         if step:
             step.finish(method=generated.method, confidence=generated.confidence)
         exec_step = trace.start_step("sql_execution", sql=generated.sql) if trace else None
         result = self.execute_sql(generated.sql)
         if exec_step:
             exec_step.finish(row_count=result.row_count, truncated=result.truncated)
-        answer = self._synthesize_answer(question, generated, result) if synthesize else result.to_markdown()
+        answer_prompt = self._answer_prompt(query, generated, result) if synthesize else None
+        generation_step = (
+            trace.start_step("structured_generation", document_count=1)
+            if trace and answer_prompt is not None
+            else None
+        )
+        answer = (
+            self._synthesize_answer(
+                query,
+                generated,
+                result,
+                prompt=answer_prompt,
+                **generate_kwargs,
+            )
+            if synthesize
+            else result.to_markdown()
+        )
+        if generation_step:
+            generation_step.finish(answer_chars=len(answer))
         doc = Document(
             content=result.to_markdown(),
             metadata={"sql": result.sql, "row_count": result.row_count, "structured": True},
             doc_id="sql-result",
             score=1.0,
         )
+        prompt = answer_prompt or ""
+        if trace:
+            trace.add_retrieval(query, [doc])
+            trace.prompt = prompt or None
+            if answer_prompt is not None:
+                trace.record_generation(
+                    prompt=answer_prompt,
+                    answer=answer,
+                    model=getattr(self.llm_client, "model", None),
+                )
+            trace.warnings.extend(generated.warnings)
+            trace.finish(answer_chars=len(answer), prompt_chars=len(prompt))
         return RAGResponse(
-            query=question,
+            query=query,
             answer=answer,
-            sources=[Source(doc.doc_id, doc.score, doc.content[:240], dict(doc.metadata))],
+            sources=[Source.from_document(doc)],
             retrieved_documents=[doc],
-            prompt=self._sql_prompt(question),
+            prompt=prompt,
             metadata={
                 "architecture": "sql_rag",
                 "sql": result.sql,
@@ -360,6 +380,7 @@ class SQLRAGEngine:
         )
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         response = self.ask(query, synthesize=False)
         return response.retrieved_documents[:top_k]
 
@@ -401,19 +422,41 @@ class SQLRAGEngine:
             + f"\nQuestion: {question}\nSQL:"
         )
 
-    def _synthesize_answer(self, question: str, generation: SQLGenerationResult, result: SQLExecutionResult) -> str:
+    def _synthesize_answer(
+        self,
+        question: str,
+        generation: SQLGenerationResult,
+        result: SQLExecutionResult,
+        *,
+        prompt: str | None,
+        **generate_kwargs: Any,
+    ) -> str:
         table = result.to_markdown(max_rows=min(10, self.max_rows))
         if not result.rows:
             return f"Aucun résultat trouvé.\n\nSQL exécuté: `{result.sql}`"
         # If using the default extractive client, avoid a verbose prompt echo and return the table directly.
         if isinstance(self.llm_client, ExtractiveLLMClient):
             return f"Voici le résultat structuré.\n\n{table}\n\nSQL exécuté: `{result.sql}`"
-        prompt = (
+        if prompt is None:  # pragma: no cover - protected by _answer_prompt
+            raise RuntimeError("Missing structured answer prompt")
+        return self.llm_client.generate(prompt, **generate_kwargs)
+
+    def _answer_prompt(
+        self,
+        question: str,
+        generation: SQLGenerationResult,
+        result: SQLExecutionResult,
+    ) -> str | None:
+        """Return the prompt that actually produces ``answer``, if any."""
+
+        if not result.rows or isinstance(self.llm_client, ExtractiveLLMClient):
+            return None
+        table = result.to_markdown(max_rows=min(10, self.max_rows))
+        return (
             "Réponds en français à partir du résultat SQL ci-dessous. "
             "Ne mentionne pas d'information absente du tableau.\n\n"
             f"Question: {question}\nSQL: {generation.sql}\nRésultat:\n{table}\n\nRéponse:"
         )
-        return self.llm_client.generate(prompt)
 
 
 class StructuredRAG:
@@ -457,8 +500,14 @@ class StructuredRAG:
     def from_sqlite(cls, database: str | Path, **kwargs: Any) -> "StructuredRAG":
         return cls(SQLRAGEngine(database=database, **kwargs))
 
-    def ask(self, question: str, **kwargs: Any) -> RAGResponse:
-        response = self.sql_engine.ask(question, **kwargs)
+    def ask(
+        self,
+        query: str | None = None,
+        *,
+        question: str | None = None,
+        **kwargs: Any,
+    ) -> RAGResponse:
+        response = self.sql_engine.ask(query, question=question, **kwargs)
         response.metadata["architecture"] = "structured_rag"
         return response
 

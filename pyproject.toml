@@ -45,7 +45,7 @@ fastapi = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2"]
 redis = ["redis>=5.0"]
 dev = ["pytest>=7", "pytest-cov", "ruff", "mypy", "build", "twine", "PyYAML>=6.0"]
 all = [
-  "sentence-transformers>=2.2",
+  "sentence-transformers>=5.0",
   "Pillow>=10.0",
   "openai>=1.0",
   "cohere>=5.0",

@@ -24,7 +24,14 @@ from __future__ import annotations
 from enum import Enum
 from typing import List
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import (
+    BaseRetriever,
+    Document,
+    LLMClient,
+    _snapshot_document,
+    _validate_non_negative_int,
+    _validate_top_k,
+)
 
 
 class DocQuality(str, Enum):
@@ -86,11 +93,12 @@ class CorrectiveRAGRetriever(BaseRetriever):
     ):
         self.base_retriever = base_retriever
         self.llm_client = llm_client
-        self.max_retries = max_retries
-        self.min_correct = min_correct
+        self.max_retries = _validate_non_negative_int(max_retries, name="max_retries")
+        self.min_correct = _validate_top_k(min_correct, name="min_correct")
         self.include_ambiguous = include_ambiguous
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         current_query = query
         all_correct: List[Document] = []
         all_ambiguous: List[Document] = []
@@ -101,7 +109,11 @@ class CorrectiveRAGRetriever(BaseRetriever):
             retrieved = self.base_retriever.retrieve(current_query, top_k=top_k * 2)
 
             # 2) Évaluation de chaque doc
-            for doc in retrieved:
+            for source_doc in retrieved:
+                # Grading metadata belongs to this retrieval request. Keep the
+                # caller's indexed document immutable so later searches and
+                # caches cannot inherit a previous query's CRAG annotations.
+                doc = _snapshot_document(source_doc)
                 label = self._evaluate(current_query, doc.content)
                 doc.metadata["crag_label"] = label.value
                 doc.metadata["evaluated_against_query"] = current_query

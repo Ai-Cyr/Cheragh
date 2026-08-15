@@ -46,7 +46,7 @@ from cheragh import LexicalEvidenceCritic, SelfRAGEngine
 engine = SelfRAGEngine(
     retriever=retriever,
     llm_client=llm,
-    critic=LexicalEvidenceCritic(),
+    evidence_critic=LexicalEvidenceCritic(),
     max_refinements=2,
 )
 result = engine.ask("Quelle politique s'applique ?")
@@ -61,7 +61,7 @@ Cette API orchestre gate, retrieval, critique et raffinement. Elle n'entraîne p
 from cheragh import AgenticRAGEngine, LLMJSONPlanner, RetrievalToolAdapter, ToolRegistry
 
 registry = ToolRegistry()
-registry.register(RetrievalToolAdapter(retriever))
+registry.register(RetrievalToolAdapter(retriever).as_tool())
 engine = AgenticRAGEngine(
     planner=LLMJSONPlanner(llm),
     tools=registry,

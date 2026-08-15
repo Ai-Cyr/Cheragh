@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import List
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 from .citations import citation_location
 
 
@@ -55,7 +55,7 @@ class AdvancedRAGPipeline:
         self.retriever = retriever
         self.llm_client = llm_client
         self.answer_prompt = answer_prompt
-        self.top_k = top_k
+        self.top_k = _validate_top_k(top_k)
 
     def run(self, query: str) -> dict:
         """Exécute le pipeline et retourne la réponse + les sources."""

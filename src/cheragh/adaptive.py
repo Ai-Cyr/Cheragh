@@ -25,7 +25,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import List, Optional
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 class GateDecision(str, Enum):
@@ -103,6 +103,7 @@ class AdaptiveRetriever(BaseRetriever):
         self.last_used_query: Optional[str] = None
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         decision = self._decide(query)
         self.last_decision = decision
         used_query = query

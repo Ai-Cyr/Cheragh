@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Any
 
-from ..base import BaseRetriever, Document, EmbeddingModel, HashingEmbedding
+from ..base import BaseRetriever, Document, EmbeddingModel, HashingEmbedding, _validate_top_k
 from ..ingestion import RecursiveTextChunker
 from ..vectorstores import MemoryVectorStore
 
@@ -138,6 +138,7 @@ class ParentChildRetriever(BaseRetriever):
         return cls(parents.values(), child_documents=children or None, embedding_model=embedding_model, **kwargs)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         child_k = max(self.top_k_children, top_k)
         child_hits = self.child_retriever.retrieve(query, top_k=child_k)
         parent_scores: dict[str, float] = {}

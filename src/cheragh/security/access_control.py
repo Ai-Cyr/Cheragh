@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
-from ..base import BaseRetriever, Document
+from ..base import BaseRetriever, Document, _validate_top_k
 
 
 _CLASSIFICATION_ORDER = {
@@ -159,6 +159,7 @@ class AccessControlledRetriever(BaseRetriever):
         self.last_denied_count = 0
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         docs = self.retriever.retrieve(query, top_k=top_k * self.overfetch_factor)
         allowed = self.policy.filter_documents(docs, self.principal)
         self.last_denied_count = max(0, len(docs) - len(allowed))
@@ -203,6 +204,8 @@ class AccessControlledRAGEngine:
         )
 
     def ask(self, query: str, principal: Principal | Mapping[str, Any] | None = None, **kwargs: Any) -> Any:
+        if kwargs.get("top_k") is not None:
+            kwargs["top_k"] = _validate_top_k(kwargs["top_k"])
         principal_obj = _coerce_principal(principal) if principal is not None else self.default_principal
         engine = self.for_principal(principal_obj)
         response = engine.ask(query, **kwargs)

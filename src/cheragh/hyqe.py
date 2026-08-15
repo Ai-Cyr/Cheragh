@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from .base import BaseRetriever, Document, EmbeddingModel, LLMClient, cosine_similarity
+from .base import BaseRetriever, Document, EmbeddingModel, LLMClient, _validate_top_k, cosine_similarity
 from .cache import hash_documents, embedder_fingerprint, load_cache, save_cache
 
 
@@ -62,6 +62,7 @@ class HyQERetriever(BaseRetriever):
 
     # ------------------------------------------------------------------ #
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         query_vec = self.embedding_model.embed_query(query)
         scores = cosine_similarity(query_vec, self._index_embeddings)
         fetch = max(top_k * 4, 20)

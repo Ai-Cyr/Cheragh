@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 from typing import Any, Mapping
 
-from ..base import BaseRetriever, Document
+from ..base import BaseRetriever, Document, _validate_top_k
 from ..security import AccessPolicy, Principal, AccessControlledRAGEngine
 
 
@@ -120,6 +121,8 @@ class MultiTenantRAGEngine:
         principal: Principal | Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
+        if kwargs.get("top_k") is not None:
+            kwargs["top_k"] = _validate_top_k(kwargs["top_k"])
         binding = self.registry.get_collection(tenant_id, collection_id)
         principal_obj = _tenant_principal(
             principal,
@@ -139,6 +142,7 @@ class MultiTenantRAGEngine:
         principal: Principal | Mapping[str, Any] | None = None,
         top_k: int = 5,
     ) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         binding = self.registry.get_collection(tenant_id, collection_id)
         principal_obj = _tenant_principal(
             principal,
@@ -191,13 +195,12 @@ class MultiTenantRAGEngine:
                 default_principal=principal,
             ).ask(query, **kwargs)
         if hasattr(target, "ask") and callable(target.ask):
-            try:
-                return target.ask(query, principal=principal, **kwargs)
-            except TypeError:
-                return target.ask(query, **kwargs)
+            return _call_with_optional_principal(target.ask, query, principal, kwargs)
         if hasattr(target, "retrieve") and callable(target.retrieve):
+            raw_top_k = kwargs.get("top_k", 5)
+            top_k = 5 if raw_top_k is None else _validate_top_k(raw_top_k)
             docs = _scope_documents(
-                target.retrieve(query, top_k=int(kwargs.get("top_k", 5))),
+                target.retrieve(query, top_k=top_k),
                 binding.tenant_id,
                 binding.collection_id,
             )
@@ -207,6 +210,30 @@ class MultiTenantRAGEngine:
         if callable(target):
             return target(query, tenant_id=principal.tenant_ids, **kwargs)
         raise TypeError(f"Unsupported tenant target type: {type(target).__name__}")
+
+
+def _call_with_optional_principal(
+    ask: Any,
+    query: str,
+    principal: Principal,
+    kwargs: Mapping[str, Any],
+) -> Any:
+    """Pass a principal only when the target explicitly declares it.
+
+    Catching ``TypeError`` around the call used to retry generators that failed
+    internally, potentially executing them twice. It also leaked ``principal``
+    into generic ``**generate_kwargs`` accepted by provider-backed engines.
+    """
+
+    try:
+        parameter = inspect.signature(ask).parameters.get("principal")
+    except (TypeError, ValueError):
+        parameter = None
+    if parameter is None:
+        return ask(query, **dict(kwargs))
+    if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+        return ask(query, principal, **dict(kwargs))
+    return ask(query, principal=principal, **dict(kwargs))
 
 
 def _tenant_principal(
@@ -255,6 +282,7 @@ class _ScopedRetriever(BaseRetriever):
         self.collection_id = collection_id
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         return _scope_documents(
             self.retriever.retrieve(query, top_k=top_k),
             self.tenant_id,

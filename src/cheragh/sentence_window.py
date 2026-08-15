@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .base import BaseRetriever, Document, EmbeddingModel, cosine_similarity
+from .base import BaseRetriever, Document, EmbeddingModel, _validate_top_k, cosine_similarity
 from .cache import hash_documents, embedder_fingerprint, load_cache, save_cache
 
 
@@ -56,6 +56,7 @@ class SentenceWindowRetriever(BaseRetriever):
 
     # ------------------------------------------------------------------ #
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         query_vec = self.embedding_model.embed_query(query)
         scores = cosine_similarity(query_vec, self.sentence_embeddings)
         fetch = max(top_k * 4, 20)

@@ -5,10 +5,34 @@ import os
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from .. import __version__
-from ..base import HashingEmbedding
+from ..base import EmbeddingModel, _validate_top_k
 from ..engine import RAGEngine
 from ..vectorstores.memory import MemoryVectorStore
+
+
+class AskRequest(BaseModel):
+    """Strict request model shared by the generated OpenAPI schema and handlers."""
+
+    model_config = ConfigDict(strict=True)
+
+    query: str = Field(..., min_length=1, max_length=8_000)
+    top_k: int | None = Field(default=None, ge=1)
+    include_prompt: bool = False
+
+
+class IndexRequest(BaseModel):
+    """Strict payload accepted by the optional indexing endpoint."""
+
+    model_config = ConfigDict(strict=True)
+
+    path: str = Field(..., min_length=1)
+    output: str = Field(default=".cheragh_index", min_length=1)
+    incremental: bool = True
+    chunk_size: int = Field(default=800, ge=1, le=100_000)
+    chunk_overlap: int = Field(default=120, ge=0, le=100_000)
 
 
 def create_app(
@@ -16,6 +40,7 @@ def create_app(
     *,
     config_path: str | None = None,
     index_path: str | None = None,
+    index_embedding_model: EmbeddingModel | None = None,
     enable_indexing: bool | None = None,
     allowed_index_root: str | Path | None = None,
     api_key: str | None = None,
@@ -32,11 +57,14 @@ def create_app(
       or ``CHERAGH_INDEX_ROOT``.
     - Set ``api_key`` or ``CHERAGH_API_KEY`` to require ``X-API-Key`` on
       API endpoints.
+
+    Local indexes created with the built-in ``HashingEmbedding`` are loaded
+    from their persisted manifest, including non-default dimensions. Pass
+    ``index_embedding_model`` explicitly for indexes built by other providers.
     """
     try:
         from fastapi import Depends, FastAPI, Header, HTTPException
         from fastapi.responses import StreamingResponse
-        from pydantic import BaseModel, Field
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError("The server requires FastAPI. Install with: pip install cheragh[fastapi]") from exc
 
@@ -44,7 +72,7 @@ def create_app(
         if config_path:
             engine = RAGEngine.from_config(config_path)
         elif index_path:
-            store = MemoryVectorStore.load(index_path, HashingEmbedding())
+            store = MemoryVectorStore.load(index_path, index_embedding_model)
             engine = RAGEngine(store.as_retriever())
         else:
             raise ValueError("create_app requires engine, config_path or index_path")
@@ -53,7 +81,7 @@ def create_app(
     indexing_enabled = env_enable_indexing if enable_indexing is None else enable_indexing
     root = Path(allowed_index_root or os.getenv("CHERAGH_INDEX_ROOT") or os.getcwd()).resolve()
     required_api_key = api_key or os.getenv("CHERAGH_API_KEY")
-    max_top_k = max(1, int(max_top_k))
+    max_top_k = _validate_top_k(max_top_k, name="max_top_k")
 
     app = FastAPI(title="cheragh", version=__version__)
 
@@ -63,32 +91,21 @@ def create_app(
 
     AuthDependency = Depends(require_api_key)
 
-    class AskRequest(BaseModel):
-        query: str = Field(..., min_length=1, max_length=8_000)
-        top_k: int | None = Field(default=None, ge=1, le=max_top_k)
-        include_prompt: bool = False
-
-    class IndexRequest(BaseModel):
-        path: str = Field(..., min_length=1)
-        output: str = Field(default=".cheragh_index", min_length=1)
-        incremental: bool = True
-        chunk_size: int = Field(default=800, ge=1, le=100_000)
-        chunk_overlap: int = Field(default=120, ge=0, le=100_000)
-
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {"status": "ok", "version": __version__}
 
     @app.post("/ask", dependencies=[AuthDependency])
     def ask(request: AskRequest) -> dict[str, Any]:
+        if request.top_k is not None and request.top_k > max_top_k:
+            raise HTTPException(status_code=422, detail=f"top_k must be <= {max_top_k}")
         response = engine.ask(request.query, top_k=request.top_k)
-        data = response.to_dict()
-        if request.include_prompt and response.trace is not None:
-            data["trace"] = response.trace.to_dict(include_prompt=True)
-        return data
+        return response.to_dict(include_prompt=request.include_prompt)
 
     @app.post("/stream", dependencies=[AuthDependency])
     def stream(request: AskRequest):
+        if request.top_k is not None and request.top_k > max_top_k:
+            raise HTTPException(status_code=422, detail=f"top_k must be <= {max_top_k}")
         return StreamingResponse(engine.stream(request.query, top_k=request.top_k), media_type="text/plain")
 
     @app.post("/index", dependencies=[AuthDependency])
@@ -119,10 +136,11 @@ def create_app(
         retriever = getattr(engine, "retriever", None)
         store = getattr(retriever, "store", None)
         docs = getattr(store, "documents", None)
+        cache_backend = getattr(engine, "cache_backend", None)
         return {
             "document_count": len(docs) if docs is not None else None,
             "top_k": getattr(engine, "top_k", None),
-            "cache": engine.cache_backend.stats().to_dict() if getattr(engine, "cache_backend", None) else None,
+            "cache": cache_backend.stats().to_dict() if cache_backend is not None else None,
         }
 
     return app

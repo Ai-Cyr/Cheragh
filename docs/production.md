@@ -79,6 +79,21 @@ indexing:
   use_lock: true
 ```
 
+Build the local index from that same validated configuration. Relative source
+and output paths are resolved from the configuration file, not from the
+process's current directory:
+
+```python
+from cheragh import index_from_config
+
+result = index_from_config("configs/production.yaml")
+print(result["output"])
+```
+
+An explicit ``output=`` overrides ``vectorstore.path``. The indexing config is
+for the local Memory vector-store format; select a provider-specific ingestion
+API instead when using FAISS, Chroma or Qdrant.
+
 ## Evaluation gate before release
 
 Run a labeled retrieval set in JSONL/YAML and reject builds that regress key metrics:

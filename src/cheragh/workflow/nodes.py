@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..base import BaseRetriever, LLMClient
+from ..base import BaseRetriever, LLMClient, _validate_top_k
 from ..compression import ContextCompressor
 from ..pipeline import AdvancedRAGPipeline, DEFAULT_ANSWER_PROMPT_FR
 from ..query import QueryTransformer
@@ -41,9 +41,13 @@ class RetrieveNode:
     output_key: str = "documents"
     top_k: int = 5
 
+    def __post_init__(self) -> None:
+        self.top_k = _validate_top_k(self.top_k)
+
     def run(self, state: dict[str, Any]) -> dict[str, Any]:
         query = str(state[self.query_key])
-        return {self.output_key: self.retriever.retrieve(query, top_k=int(state.get("top_k", self.top_k)))}
+        top_k = _validate_top_k(state.get("top_k", self.top_k))
+        return {self.output_key: self.retriever.retrieve(query, top_k=top_k)}
 
 
 @dataclass

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 ROUTER_PROMPT_FR = """Tu es un routeur qui choisit le meilleur index documentaire pour répondre à une question.
@@ -81,6 +81,7 @@ class QueryRouter(BaseRetriever):
         self.default_route = default_route or next(iter(routes))
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         # 1) Décision : quelle route ?
         chosen = self._route(query)
 
@@ -147,6 +148,7 @@ class EnsembleRetriever(BaseRetriever):
         self.per_retriever_top_k = per_retriever_top_k
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         rrf_scores: Dict[str, float] = {}
         doc_lookup: Dict[str, Document] = {}
         source_map: Dict[str, List[int]] = {}  # doc_key -> [indices des retrievers l'ayant ramené]
