@@ -403,6 +403,8 @@ class CorrectiveRAGEngine:
 
         assert best is not None  # candidate_queries always contains the original query
         if not best.usable:
+            best_action = best.initial_grade.action
+            assert best_action is not None  # normalized by _grade()
             attempt_snapshot = deepcopy(attempts)
             response = RAGResponse(
                 query=query,
@@ -414,7 +416,7 @@ class CorrectiveRAGEngine:
                     "corrective": True,
                     "retrieval_grade": best.initial_grade.to_dict(),
                     "post_correction_grade": best.final_grade.to_dict(),
-                    "retrieval_action": best.initial_grade.action.value,
+                    "retrieval_action": best_action.value,
                     "external_document_ids": list(best.external_document_ids),
                     "external_retrieval_attempted": best.external_attempted,
                     "knowledge_refined": best.refined,
@@ -442,31 +444,43 @@ class CorrectiveRAGEngine:
             for candidate in candidate_queries:
                 if candidate == selected.query:
                     continue
-                outcome = outcomes.get(candidate)
-                if outcome is None:
-                    outcome = self._correct_candidate(candidate, effective_top_k)
-                    outcomes[candidate] = outcome
-                    attempts.append(outcome.log(attempt=len(attempts) + 1, stage="answer_grounding_retry"))
-                if not outcome.usable:
+                retry_outcome = outcomes.get(candidate)
+                if retry_outcome is None:
+                    retry_outcome = self._correct_candidate(candidate, effective_top_k)
+                    outcomes[candidate] = retry_outcome
+                    attempts.append(
+                        retry_outcome.log(
+                            attempt=len(attempts) + 1,
+                            stage="answer_grounding_retry",
+                        )
+                    )
+                if not retry_outcome.usable:
                     continue
-                retry_response = self._generate_from_documents(candidate, outcome.documents, effective_top_k, kwargs)
+                retry_response = self._generate_from_documents(
+                    candidate,
+                    retry_outcome.documents,
+                    effective_top_k,
+                    kwargs,
+                )
                 attempts[-1]["grounded_score"] = retry_response.grounded_score
                 if retry_response.grounded_score > response.grounded_score:
                     response = retry_response
-                    selected = outcome
+                    selected = retry_outcome
                 if response.grounded_score >= self.min_grounded_score:
                     break
 
+        selected_action = selected.initial_grade.action
+        assert selected_action is not None  # normalized by _grade()
         corrected = (
             selected.query != query
-            or selected.initial_grade.action is not RetrievalAction.CORRECT
+            or selected_action is not RetrievalAction.CORRECT
             or bool(selected.external_document_ids)
             or selected.refined
         )
         response.metadata.setdefault("corrective", True)
         response.metadata["original_query"] = query
         response.metadata["selected_query"] = selected.query
-        response.metadata["retrieval_action"] = selected.initial_grade.action.value
+        response.metadata["retrieval_action"] = selected_action.value
         response.metadata["retrieval_grade"] = selected.initial_grade.to_dict()
         response.metadata["post_correction_grade"] = selected.final_grade.to_dict()
         response.metadata["corrected_document_ids"] = [document.doc_id for document in selected.documents]
@@ -484,7 +498,7 @@ class CorrectiveRAGEngine:
         if response.trace is not None:
             response.trace.query = query
             response.trace.metadata["selected_query"] = selected.query
-            response.trace.metadata["corrective_action"] = selected.initial_grade.action.value
+            response.trace.metadata["corrective_action"] = selected_action.value
             response.trace.metadata["corrected_document_ids"] = [document.doc_id for document in selected.documents]
             response.trace.warnings.extend(
                 warning for warning in response.warnings if warning not in response.trace.warnings
@@ -621,8 +635,9 @@ class CorrectiveRAGEngine:
         snapshots = _validated_snapshots(documents, name="documents")
         if refiner is None:
             return snapshots
-        if callable(getattr(refiner, "refine", None)):
-            output = refiner.refine(query, _snapshot_documents(snapshots))
+        refine_method = getattr(refiner, "refine", None)
+        if callable(refine_method):
+            output = refine_method(query, _snapshot_documents(snapshots))
         elif callable(refiner):
             output = refiner(query, _snapshot_documents(snapshots))
         else:  # pragma: no cover - constructor validation guards this path
