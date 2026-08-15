@@ -6,11 +6,12 @@ objects should remain backward-compatible across 1.x releases.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator, Protocol, runtime_checkable
+from typing import Any, Iterator, Protocol, Sequence, runtime_checkable
 
 from .base import Document
-from .citations import CitationValidationResult
+from .citations import CitationValidationResult, citation_location
 from .tracing import RAGTrace
 
 
@@ -55,6 +56,18 @@ class Source:
     preview: str
     metadata: dict[str, Any] = field(default_factory=dict)
     location: str = ""
+
+    @classmethod
+    def from_document(cls, document: Document, *, preview_chars: int = 240) -> "Source":
+        """Build a source while preserving the standard provenance location."""
+
+        return cls(
+            doc_id=document.doc_id,
+            score=document.score,
+            preview=document.content[:preview_chars],
+            metadata=deepcopy(document.metadata or {}),
+            location=citation_location(document),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,5 +153,5 @@ class LLMProtocol(Protocol):
 class RerankerProtocol(Protocol):
     """Protocol implemented by rerankers."""
 
-    def rerank(self, query: str, documents: Iterable[Document], top_k: int | None = None) -> list[Document]:
+    def rerank(self, query: str, documents: Sequence[Document], top_k: int = 5) -> list[Document]:
         ...

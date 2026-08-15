@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 MULTI_QUERY_PROMPT_FR = """Tu es un assistant spécialisé en recherche d'information.
@@ -66,6 +66,7 @@ class RAGFusionRetriever(BaseRetriever):
         self.per_query_top_k = per_query_top_k
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         # 1) Génération des reformulations
         queries = self._generate_queries(query)
 

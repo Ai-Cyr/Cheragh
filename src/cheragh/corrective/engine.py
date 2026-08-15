@@ -10,9 +10,17 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Callable, Iterable
 
-from ..base import BaseRetriever, Document, LLMClient, ExtractiveLLMClient
+from ..base import (
+    BaseRetriever,
+    Document,
+    ExtractiveLLMClient,
+    LLMClient,
+    _validate_non_negative_int,
+    _validate_top_k,
+)
 from ..engine import RAGEngine, RAGResponse
 from ..query import MultiQueryTransformer, QueryTransformer
+from ..tracing import RAGTrace
 
 
 @dataclass
@@ -53,8 +61,24 @@ class CorrectiveRAGResult:
     def metadata(self) -> dict[str, Any]:
         return self.response.metadata
 
-    def to_dict(self) -> dict[str, Any]:
-        data = self.response.to_dict()
+    @property
+    def query(self) -> str:
+        return self.response.query
+
+    @property
+    def retrieved_documents(self) -> list[Document]:
+        return self.response.retrieved_documents
+
+    @property
+    def warnings(self) -> list[str]:
+        return self.response.warnings
+
+    @property
+    def trace(self) -> RAGTrace | None:
+        return self.response.trace
+
+    def to_dict(self, *, include_prompt: bool = False) -> dict[str, Any]:
+        data = self.response.to_dict(include_prompt=include_prompt)
         data["corrective"] = {"corrected": self.corrected, "attempts": self.attempts}
         return data
 
@@ -106,20 +130,26 @@ class CorrectiveRAGEngine:
     ):
         if base_engine is None and retriever is None:
             raise ValueError("Provide either base_engine or retriever")
+        if base_engine is not None and retriever is not None and retriever is not base_engine.retriever:
+            raise ValueError("retriever conflicts with base_engine.retriever")
+        if base_engine is not None and llm_client is not None and llm_client is not base_engine.llm_client:
+            raise ValueError("llm_client conflicts with base_engine.llm_client")
         if base_engine is None:
+            assert retriever is not None  # narrowed by the validation above
             base_engine = RAGEngine(retriever=retriever, llm_client=llm_client or ExtractiveLLMClient(), strict_grounding=True)
         self.base_engine = base_engine
         self.retriever = retriever or base_engine.retriever
         self.llm_client = llm_client or base_engine.llm_client
         self.retrieval_grader = retrieval_grader or LexicalRetrievalGrader(min_overlap=min_context_score)
         self.query_rewriter = query_rewriter or MultiQueryTransformer(num_queries=max(2, max_retries + 1))
-        self.max_retries = max(0, max_retries)
+        self.max_retries = _validate_non_negative_int(max_retries, name="max_retries")
         self.min_context_score = min_context_score
         self.min_grounded_score = min_grounded_score
         self.fallback_answer = fallback_answer
         self.return_details = return_details
 
     def ask(self, query: str, top_k: int | None = None, **kwargs: Any) -> RAGResponse | CorrectiveRAGResult:
+        effective_top_k = self.base_engine.top_k if top_k is None else _validate_top_k(top_k)
         attempts: list[dict[str, Any]] = []
         candidate_queries = self._candidate_queries(query)
         candidate_queries = candidate_queries[: max(1, self.max_retries + 1)]
@@ -127,7 +157,7 @@ class CorrectiveRAGEngine:
         best_grade = RetrievalGrade(0.0, False, "not_evaluated", 0)
 
         for idx, candidate in enumerate(candidate_queries):
-            docs = self.retriever.retrieve(candidate, top_k=top_k or self.base_engine.top_k)
+            docs = self.retriever.retrieve(candidate, top_k=effective_top_k)
             grade = self._grade(candidate, docs)
             attempts.append({"attempt": idx + 1, "query": candidate, "retrieval_grade": grade.to_dict()})
             if grade.score > best_grade.score:
@@ -154,7 +184,7 @@ class CorrectiveRAGEngine:
             )
             return CorrectiveRAGResult(response=response, attempts=attempts, corrected=True) if self.return_details else response
 
-        response = self.base_engine.ask(best_query, top_k=top_k, **kwargs)
+        response = self.base_engine.ask(best_query, top_k=effective_top_k, **kwargs)
         response.metadata.setdefault("corrective", True)
         response.metadata["original_query"] = query
         response.metadata["selected_query"] = best_query
@@ -166,7 +196,7 @@ class CorrectiveRAGEngine:
             for candidate in candidate_queries:
                 if candidate == best_query:
                     continue
-                retry_response = self.base_engine.ask(candidate, top_k=top_k, **kwargs)
+                retry_response = self.base_engine.ask(candidate, top_k=effective_top_k, **kwargs)
                 attempts.append(
                     {
                         "attempt": len(attempts) + 1,
@@ -185,7 +215,12 @@ class CorrectiveRAGEngine:
                 if response.grounded_score >= self.min_grounded_score:
                     break
 
+        # Query rewriting is an internal corrective detail. The public response
+        # continues to represent the request made by the caller.
+        response.query = query
         if response.trace is not None:
+            response.trace.query = query
+            response.trace.metadata["selected_query"] = response.metadata.get("selected_query", best_query)
             response.trace.warnings.extend([warning for warning in response.warnings if warning not in response.trace.warnings])
         return CorrectiveRAGResult(response=response, attempts=attempts, corrected=corrected) if self.return_details else response
 

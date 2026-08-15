@@ -16,6 +16,23 @@ from .ingestion.pipeline import _combined_exclude_patterns, _is_excluded, _looks
 from .vectorstores.memory import MemoryVectorStore
 
 
+_CONFIG_OVERRIDE_TARGETS = {
+    "path": ("ingestion", "path"),
+    "chunk_size": ("ingestion", "chunk_size"),
+    "chunk_overlap": ("ingestion", "chunk_overlap"),
+    "recursive": ("ingestion", "recursive"),
+    "exclude_patterns": ("ingestion", "exclude_patterns"),
+    "max_file_size_mb": ("ingestion", "max_file_size_mb"),
+    "incremental": ("indexing", "incremental"),
+    "dry_run": ("indexing", "dry_run"),
+    "force": ("indexing", "force"),
+    "use_lock": ("indexing", "use_lock"),
+    "lock_timeout_seconds": ("indexing", "lock_timeout_seconds"),
+}
+
+_INDEXING_OPTIONS_METADATA_KEY = "indexing_options"
+
+
 @dataclass
 class IndexedFile:
     """Manifest entry for one indexed source file."""
@@ -100,6 +117,104 @@ class IndexOptions:
     lock_timeout_seconds: float = 10.0
 
 
+def index_from_config(
+    config_path: str | Path,
+    *,
+    output: str | Path | None = None,
+    embedding_model: EmbeddingModel | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Build a local memory index from a validated Cheragh config.
+
+    ``ingestion.path``, ``vectorstore.path`` and an explicit ``output`` are
+    resolved relative to the config file.  Explicit output wins over
+    ``vectorstore.path``; when neither is set, ``.cheragh_index`` next to the
+    config file is used.
+
+    The accepted overrides mirror the ingestion and indexing options consumed
+    by :func:`index_path`. Unknown or ``None`` overrides are rejected so a typo
+    cannot silently change the indexing contract.
+
+    Only the local :class:`MemoryVectorStore` persistence format is supported.
+    Remote or backend-specific vector stores must use their own ingestion API.
+    """
+
+    from .config import load_raw_config
+    from .config.schema import validate_config
+
+    config_file = Path(config_path).expanduser().resolve()
+    config_dir = config_file.parent
+    config = load_raw_config(config_file)
+    validate_config(config)
+
+    unknown = sorted(set(overrides) - set(_CONFIG_OVERRIDE_TARGETS))
+    if unknown:
+        supported = ", ".join(sorted(_CONFIG_OVERRIDE_TARGETS))
+        raise TypeError(
+            f"Unsupported index_from_config override(s): {', '.join(unknown)}. "
+            f"Supported overrides: {supported}"
+        )
+    null_overrides = sorted(key for key, value in overrides.items() if value is None)
+    if null_overrides:
+        raise ValueError(
+            "index_from_config overrides cannot be None: " + ", ".join(null_overrides)
+        )
+
+    for key, value in overrides.items():
+        section, field_name = _CONFIG_OVERRIDE_TARGETS[key]
+        if key == "path" and isinstance(value, Path):
+            value = str(value)
+        config.setdefault(section, {})[field_name] = value
+
+    # Revalidate after applying overrides so their types and cross-field
+    # constraints are held to the same contract as values loaded from disk.
+    validated = validate_config(config)
+    ingestion = validated.ingestion.model_dump()
+    indexing = validated.indexing.model_dump()
+    vectorstore = validated.vectorstore.model_dump()
+
+    vectorstore_type = vectorstore.get("type")
+    if vectorstore_type not in {None, "memory", "vector"}:
+        raise ValueError(
+            "index_from_config only writes the local MemoryVectorStore format; "
+            f"vectorstore.type={vectorstore_type!r} is not supported"
+        )
+
+    source = ingestion.get("path")
+    if not source:
+        raise ValueError("Config must define ingestion.path for index_from_config")
+    source_path = _resolve_config_path(config_dir, source)
+
+    configured_output = output if output is not None else vectorstore.get("path")
+    output_path = _resolve_config_path(
+        config_dir,
+        configured_output if configured_output is not None else ".cheragh_index",
+    )
+
+    if embedding_model is None:
+        # Imported lazily to keep indexing independent from the engine module at
+        # import time while reusing the package's provider factory.
+        from .engine import _embedding_from_config
+
+        embedding_model = _embedding_from_config(validated.embedding.model_dump(exclude_none=True))
+
+    return index_path(
+        source_path,
+        output_path,
+        embedding_model=embedding_model,
+        chunk_size=ingestion.get("chunk_size", 800),
+        chunk_overlap=ingestion.get("chunk_overlap", 120),
+        recursive=ingestion.get("recursive", True),
+        incremental=indexing.get("incremental", True),
+        dry_run=indexing.get("dry_run", False),
+        force=indexing.get("force", False),
+        exclude_patterns=ingestion.get("exclude_patterns") or None,
+        max_file_size_mb=ingestion.get("max_file_size_mb"),
+        use_lock=indexing.get("use_lock", True),
+        lock_timeout_seconds=indexing.get("lock_timeout_seconds", 10.0),
+    )
+
+
 def index_path(
     path: str | Path,
     output: str | Path,
@@ -153,7 +268,10 @@ def index_path(
                 raise ValueError("The index output directory cannot be the source directory")
             relative = output_relative.as_posix()
             scan_excludes.extend((relative, f"{relative}/**"))
-    output_path.mkdir(parents=True, exist_ok=True)
+    # Planning a dry run must not mutate the filesystem, including creating an
+    # otherwise empty output directory.
+    if not options.dry_run:
+        output_path.mkdir(parents=True, exist_ok=True)
 
     with _index_lock(output_path, enabled=options.use_lock and not options.dry_run, timeout=options.lock_timeout_seconds):
         previous = load_manifest(output_path) if options.incremental else IndexManifest()
@@ -170,10 +288,24 @@ def index_path(
             and previous.metadata.get("embedding_model")
             and previous.metadata.get("embedding_model") != embedder.get_fingerprint()
         )
+        current_indexing_options = _indexing_options_metadata(options)
+        previous_indexing_options = previous.metadata.get(_INDEXING_OPTIONS_METADATA_KEY)
+        indexing_options_changed = bool(
+            previous.files
+            and (
+                not isinstance(previous_indexing_options, dict)
+                or previous_indexing_options != current_indexing_options
+            )
+        )
         plan = plan_incremental_update(
             previous,
             current_entries,
-            force=options.force or not options.incremental or embedding_changed,
+            force=(
+                options.force
+                or not options.incremental
+                or embedding_changed
+                or indexing_options_changed
+            ),
         )
         plan.skipped_files.extend(skipped)
 
@@ -184,11 +316,18 @@ def index_path(
                 "output": str(output_path),
                 "plan": plan.to_dict(),
                 "embedding_changed": embedding_changed,
+                "indexing_options_changed": indexing_options_changed,
             }
 
         kept_docs: list[Document] = []
         kept_embeddings = None
-        if options.incremental and not embedding_changed and (output_path / "documents.jsonl").exists() and (output_path / "embeddings.npy").exists():
+        if (
+            options.incremental
+            and not embedding_changed
+            and not indexing_options_changed
+            and (output_path / "documents.jsonl").exists()
+            and (output_path / "embeddings.npy").exists()
+        ):
             existing = MemoryVectorStore.load(output_path, embedder)
             dirty_sources = set(plan.changed_files) | set(plan.deleted_files)
             kept_indices = [
@@ -234,6 +373,7 @@ def index_path(
                 "updated_at_unix": time.time(),
                 "embedding_model": embedder.get_fingerprint(),
                 "incremental": options.incremental,
+                _INDEXING_OPTIONS_METADATA_KEY: current_indexing_options,
             }
         )
         for source, entry in current_entries.items():
@@ -257,6 +397,7 @@ def index_path(
             "output": str(output_path),
             "plan": plan.to_dict(),
             "embedding_changed": embedding_changed,
+            "indexing_options_changed": indexing_options_changed,
         }
 
 
@@ -374,6 +515,28 @@ def _resolved_source(doc: Document) -> str:
     return str(Path(str(source)).resolve()) if source else ""
 
 
+def _indexing_options_metadata(options: IndexOptions) -> dict[str, Any]:
+    """Return the persisted contract that determines chunks and corpus scope."""
+
+    return {
+        "chunk_size": options.chunk_size,
+        "chunk_overlap": options.chunk_overlap,
+        "recursive": options.recursive,
+        "include_pdf": options.include_pdf,
+        "include_docx": options.include_docx,
+        # Exclusion order and duplicates do not affect matching semantics.
+        "exclude_patterns": sorted({str(pattern) for pattern in (options.exclude_patterns or ())}),
+        "max_file_size_mb": options.max_file_size_mb,
+    }
+
+
+def _resolve_config_path(config_dir: Path, value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (config_dir / path).resolve()
+
+
 @contextmanager
 def _index_lock(index_path: Path, *, enabled: bool, timeout: float = 10.0) -> Iterator[None]:
     if not enabled:
@@ -407,6 +570,7 @@ __all__ = [
     "IndexOptions",
     "IndexPlan",
     "file_sha256",
+    "index_from_config",
     "index_path",
     "inspect_index",
     "load_manifest",

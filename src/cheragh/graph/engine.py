@@ -12,7 +12,15 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable
 
-from ..base import BaseRetriever, Document, EmbeddingModel, ExtractiveLLMClient, HashingEmbedding, LLMClient
+from ..base import (
+    BaseRetriever,
+    Document,
+    EmbeddingModel,
+    ExtractiveLLMClient,
+    HashingEmbedding,
+    LLMClient,
+    _validate_top_k,
+)
 from ..engine import RAGEngine, RAGResponse
 from ..vectorstores import MemoryVectorStore
 
@@ -106,6 +114,7 @@ class GraphRAGRetriever(BaseRetriever):
         self.graph_boost = graph_boost
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         entities = _extract_entities(query)
         graph_doc_ids = self.graph.doc_ids_for_entities(entities, depth=self.graph_depth)
         merged: dict[str, Document] = {}
@@ -178,6 +187,8 @@ class GraphRAGEngine:
         return cls(documents, **kwargs)
 
     def ask(self, query: str, top_k: int | None = None, **generate_kwargs: Any) -> RAGResponse:
+        if top_k is not None:
+            top_k = _validate_top_k(top_k)
         response = self.engine.ask(query, top_k=top_k, **generate_kwargs)
         entities = _extract_entities(query)
         response.metadata.update(
@@ -190,6 +201,7 @@ class GraphRAGEngine:
         return response
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         return self.retriever.retrieve(query, top_k=top_k)
 
 

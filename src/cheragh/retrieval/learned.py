@@ -11,7 +11,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 import math
 from typing import Any
 
-from ..base import BaseRetriever, Document, _numpy
+from ..base import BaseRetriever, Document, _numpy, _validate_top_k
 
 
 SparseVector = dict[Hashable, float]
@@ -318,13 +318,6 @@ def _validate_query(query: str) -> None:
         raise TypeError("query must be a string")
     if not query.strip():
         raise ValueError("query must not be empty")
-
-
-def _validate_top_k(top_k: int) -> None:
-    if isinstance(top_k, bool) or not isinstance(top_k, int):
-        raise TypeError("top_k must be an integer")
-    if top_k <= 0:
-        raise ValueError("top_k must be > 0")
 
 
 def _encoder_method(encoder: Any, role: str) -> Callable[[Sequence[str]], Any]:

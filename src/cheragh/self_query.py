@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .base import BaseRetriever, Document, EmbeddingModel, LLMClient, cosine_similarity
+from .base import BaseRetriever, Document, EmbeddingModel, LLMClient, _validate_top_k, cosine_similarity
 from .cache import hash_documents, embedder_fingerprint, load_cache, save_cache
 
 
@@ -57,6 +57,7 @@ class SelfQueryRetriever(BaseRetriever):
 
     # ------------------------------------------------------------------ #
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         cleaned_query, filters = self._parse_query(query)
         mask = np.array(
             [self._match_filters(d.metadata, filters) for d in self.documents], dtype=bool

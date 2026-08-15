@@ -5,7 +5,16 @@ import math
 from collections import Counter
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence
 
-from .base import BaseRetriever, Document, EmbeddingModel, _numpy, cosine_similarity, min_max_normalize
+from .base import (
+    BaseRetriever,
+    Document,
+    EmbeddingModel,
+    _numpy,
+    _snapshot_documents,
+    _validate_top_k,
+    cosine_similarity,
+    min_max_normalize,
+)
 from .cache import embedder_fingerprint, hash_documents, load_cache, save_cache
 from .filters import metadata_matches
 from .tokenization import RetrievalTokenizer
@@ -40,7 +49,7 @@ class HybridSearchRetriever(BaseRetriever):
     ):
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("alpha must be in [0, 1].")
-        self.documents = documents
+        self.documents = _snapshot_documents(documents)
         self.embedding_model = embedding_model
         self.alpha = alpha
         self.filters = filters
@@ -56,6 +65,7 @@ class HybridSearchRetriever(BaseRetriever):
             self._save_cache()
 
     def retrieve(self, query: str, top_k: int = 5, filters: Optional[dict[str, Any]] = None) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         np = _numpy()
         if not self.documents:
             return []

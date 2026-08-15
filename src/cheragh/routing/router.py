@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from ..base import _validate_top_k
 from .classifiers import QueryClassifier, RouteDecision, RuleBasedQueryClassifier
 
 
@@ -82,6 +83,8 @@ class QueryRouter:
         return decision
 
     def ask(self, query: str, **kwargs: Any) -> Any:
+        if kwargs.get("top_k") is not None:
+            kwargs["top_k"] = _validate_top_k(kwargs["top_k"])
         decision = self.route(query)
         route = self.routes[decision.route]
         result = self._execute(route, query, **kwargs)
@@ -92,6 +95,8 @@ class QueryRouter:
         return self.ask(query, **kwargs)
 
     def stream(self, query: str, **kwargs: Any):
+        if kwargs.get("top_k") is not None:
+            kwargs["top_k"] = _validate_top_k(kwargs["top_k"])
         decision = self.route(query)
         route = self.routes[decision.route]
         if hasattr(route, "stream") and callable(route.stream):
@@ -111,7 +116,8 @@ class QueryRouter:
         if hasattr(route, "run") and callable(route.run):
             return route.run(query, **kwargs)
         if hasattr(route, "retrieve") and callable(route.retrieve):
-            top_k = int(kwargs.pop("top_k", 5))
+            raw_top_k = kwargs.pop("top_k", 5)
+            top_k = 5 if raw_top_k is None else _validate_top_k(raw_top_k)
             return route.retrieve(query, top_k=top_k)
         if callable(route):
             return route(query, **kwargs)

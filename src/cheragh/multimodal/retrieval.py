@@ -11,16 +11,18 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
 from pathlib import Path
 from typing import Any
 
-from ..base import BaseRetriever, Document, ExtractiveLLMClient, LLMClient, _numpy
-from ..citations import citation_location, validate_citations
+from ..base import BaseRetriever, Document, ExtractiveLLMClient, LLMClient, _numpy, _validate_top_k
+from ..citations import validate_citations
 from ..filters import metadata_matches
 from ..schema import RAGResponse, Source
+from ..tracing import RAGTrace
 
 
 class Modality(str, Enum):
@@ -171,7 +173,7 @@ class MultimodalRetriever(BaseRetriever):
 
     def add_documents(self, documents: Iterable[MultimodalDocument]) -> None:
         np = _numpy()
-        docs = [doc if isinstance(doc, MultimodalDocument) else MultimodalDocument(**doc) for doc in documents]
+        docs = [_snapshot_multimodal_document(doc) for doc in documents]
         if not docs:
             return
         vectors = np.asarray(self.embedding_model.embed_documents(docs), dtype=float)
@@ -186,6 +188,7 @@ class MultimodalRetriever(BaseRetriever):
         self.embeddings = vectors if self.embeddings is None else np.vstack([self.embeddings, vectors])
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        _validate_top_k(top_k)
         return list(self.retrieve_multimodal(MultimodalQuery(text=query), top_k=top_k))
 
     def retrieve_multimodal(
@@ -196,7 +199,8 @@ class MultimodalRetriever(BaseRetriever):
         filters: dict[str, Any] | None = None,
     ) -> list[MultimodalDocument]:
         np = _numpy()
-        if top_k <= 0 or not self.documents or self.embeddings is None:
+        _validate_top_k(top_k)
+        if not self.documents or self.embeddings is None:
             return []
         allowed = {Modality(value) for value in modalities} if modalities is not None else None
         candidates = [
@@ -254,44 +258,75 @@ class MultimodalRAGEngine:
         llm_client: LLMClient | None = None,
         top_k: int = 5,
         require_citations: bool = True,
+        trace_enabled: bool = True,
     ):
         self.retriever = retriever
         self.llm_client = llm_client or ExtractiveLLMClient()
-        self.top_k = top_k
+        self.top_k = _validate_top_k(top_k)
         self.require_citations = require_citations
+        self.trace_enabled = trace_enabled
 
     def ask(
         self,
         query: str | MultimodalQuery,
         top_k: int | None = None,
         modalities: Iterable[Modality | str] | None = None,
+        filters: dict[str, Any] | None = None,
         **generate_kwargs: Any,
     ) -> RAGResponse:
         request = query if isinstance(query, MultimodalQuery) else MultimodalQuery(text=query)
-        docs = self.retriever.retrieve_multimodal(request, top_k=top_k or self.top_k, modalities=modalities)
+        effective_top_k = self.top_k if top_k is None else _validate_top_k(top_k)
+        trace_query = request.text or str(request.uri)
+        trace = RAGTrace(query=trace_query) if self.trace_enabled else None
+        retrieval_step = trace.start_step("multimodal_retrieval", top_k=effective_top_k) if trace else None
+        docs = self.retriever.retrieve_multimodal(
+            request,
+            top_k=effective_top_k,
+            modalities=modalities,
+            filters=filters,
+        )
+        if retrieval_step:
+            retrieval_step.finish(document_count=len(docs))
+        if trace:
+            trace.add_retrieval(trace_query, list(docs))
         context = self._format_context(docs)
         prompt = (
             "Réponds uniquement avec les sources multimodales fournies. "
             "Cite chaque affirmation avec [source: doc_id].\n\n"
             f"Sources :\n{context}\n\nQuestion : {request.text or request.uri}\nRéponse :"
         )
+        if trace:
+            trace.prompt = prompt
+        generation_step = trace.start_step("multimodal_generation", document_count=len(docs)) if trace else None
         answer = self.llm_client.generate(prompt, **generate_kwargs)
+        if generation_step:
+            generation_step.finish(answer_chars=len(answer))
         validation = validate_citations(answer, docs, require_citations=self.require_citations)
+        if trace:
+            trace.record_generation(
+                prompt=prompt,
+                answer=answer,
+                model=getattr(self.llm_client, "model", None),
+            )
+            trace.warnings.extend(validation.warnings)
+            trace.finish(answer_chars=len(answer), prompt_chars=len(prompt))
         return RAGResponse(
-            query=request.text or str(request.uri),
+            query=trace_query,
             answer=answer,
-            sources=[
-                Source(doc.doc_id, doc.score, doc.content[:240], dict(doc.metadata), citation_location(doc))
-                for doc in docs
-            ],
+            sources=[Source.from_document(doc) for doc in docs],
             retrieved_documents=list(docs),
             prompt=prompt,
-            metadata={"architecture": "multimodal_rag", "query_modality": request.modality.value},
+            metadata={
+                "architecture": "multimodal_rag",
+                "query_modality": request.modality.value,
+                "top_k": effective_top_k,
+            },
             citations=validation.citations,
             warnings=validation.warnings,
             grounded_score=validation.grounded_score,
             unsourced_claims=validation.unsourced_claims,
             citation_validation=validation,
+            trace=trace,
         )
 
     @staticmethod
@@ -310,3 +345,19 @@ def _normalize_rows(matrix: Any) -> Any:
     np = _numpy()
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     return matrix / np.where(norms == 0, 1.0, norms)
+
+
+def _snapshot_multimodal_document(document: MultimodalDocument | dict[str, Any]) -> MultimodalDocument:
+    """Copy media documents so later caller mutations cannot stale embeddings."""
+
+    if not isinstance(document, MultimodalDocument):
+        document = MultimodalDocument(**deepcopy(document))
+    return MultimodalDocument(
+        content=document.content,
+        metadata=deepcopy(document.metadata or {}),
+        doc_id=document.doc_id,
+        score=document.score,
+        modality=document.modality,
+        uri=document.uri,
+        mime_type=document.mime_type,
+    )

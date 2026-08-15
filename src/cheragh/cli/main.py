@@ -9,7 +9,7 @@ import sys
 from ..base import HashingEmbedding, OpenAILLMClient, ExtractiveLLMClient
 from ..engine import RAGEngine
 from ..evaluation import evaluate_retrieval
-from ..indexing import index_path as build_index, inspect_index
+from ..indexing import index_from_config, index_path as build_index, inspect_index
 from ..vectorstores import MemoryVectorStore
 
 DEFAULT_CONFIG = """# cheragh configuration
@@ -53,6 +53,26 @@ indexing:
 """
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def _non_negative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cheragh", description="Index, query, serve and evaluate RAG corpora.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -61,25 +81,84 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--output", "-o", default="rag.yaml")
 
     index = sub.add_parser("index", help="Index a file or directory into a local vector store")
-    index.add_argument("path", help="File or directory to index")
-    index.add_argument("--output", "-o", default=".cheragh_index", help="Output index directory")
-    index.add_argument("--chunk-size", type=int, default=800)
-    index.add_argument("--chunk-overlap", type=int, default=120)
-    index.add_argument("--dimension", type=int, default=384, help="HashingEmbedding dimension")
-    index.add_argument("--incremental", action="store_true", default=True, help="Re-index only changed files and remove deleted ones")
-    index.add_argument("--no-incremental", action="store_false", dest="incremental", help="Rebuild the entire index")
-    index.add_argument("--dry-run", action="store_true", help="Show the incremental plan without writing the index")
-    index.add_argument("--force", action="store_true", help="Treat all current files as changed")
-    index.add_argument("--exclude", action="append", default=None, help="Additional glob exclusion pattern; can be repeated")
-    index.add_argument("--max-file-size-mb", type=float, default=50)
-    index.add_argument("--no-lock", action="store_false", dest="use_lock", help="Disable index writer lock")
+    index.add_argument("path", nargs="?", help="File or directory to index")
+    index.add_argument("--config", default=None, help="Load ingestion, embedding, and indexing options from YAML/JSON")
+    index.add_argument("--output", "-o", default=None, help="Output index directory")
+    index.add_argument("--chunk-size", type=_positive_int, default=None)
+    index.add_argument("--chunk-overlap", type=int, default=None)
+    index.add_argument("--dimension", type=_positive_int, default=None, help="Override the HashingEmbedding dimension")
+    incremental = index.add_mutually_exclusive_group()
+    incremental.add_argument(
+        "--incremental",
+        action="store_true",
+        dest="incremental",
+        help="Re-index only changed files and remove deleted ones",
+    )
+    incremental.add_argument(
+        "--no-incremental",
+        action="store_false",
+        dest="incremental",
+        help="Rebuild the entire index",
+    )
+    dry_run = index.add_mutually_exclusive_group()
+    dry_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Show the incremental plan without writing the index",
+    )
+    dry_run.add_argument(
+        "--no-dry-run",
+        action="store_false",
+        dest="dry_run",
+        help="Write the index even if config enables dry-run",
+    )
+    force = index.add_mutually_exclusive_group()
+    force.add_argument("--force", action="store_true", dest="force", help="Treat all current files as changed")
+    force.add_argument(
+        "--no-force",
+        action="store_false",
+        dest="force",
+        help="Do not force unchanged files to be re-indexed",
+    )
+    index.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        help="Additional glob exclusion pattern; can be repeated",
+    )
+    index.add_argument("--max-file-size-mb", type=float, default=None)
+    locking = index.add_mutually_exclusive_group()
+    locking.add_argument("--use-lock", action="store_true", dest="use_lock", help="Enable the index writer lock")
+    locking.add_argument(
+        "--no-lock",
+        "--no-use-lock",
+        action="store_false",
+        dest="use_lock",
+        help="Disable the index writer lock",
+    )
+    index.add_argument(
+        "--lock-timeout",
+        "--lock-timeout-seconds",
+        dest="lock_timeout_seconds",
+        type=_non_negative_float,
+        default=None,
+        help="Seconds to wait for the index writer lock",
+    )
+    index.set_defaults(incremental=None, dry_run=None, force=None, use_lock=None)
 
     ask = sub.add_parser("ask", help="Ask a question against a config or local vector index")
     ask.add_argument("question")
-    ask.add_argument("--config", default=None, help="Load a RAGEngine from YAML/JSON config")
-    ask.add_argument("--index", default=".cheragh_index", help="Index directory")
-    ask.add_argument("--top-k", type=int, default=None, help="Override the engine/config top_k")
-    ask.add_argument("--dimension", type=int, default=384)
+    ask_source = ask.add_mutually_exclusive_group()
+    ask_source.add_argument("--config", default=None, help="Load a RAGEngine from YAML/JSON config")
+    ask_source.add_argument("--index", default=None, help="Index directory (default: .cheragh_index)")
+    ask.add_argument("--top-k", type=_positive_int, default=None, help="Override the engine/config top_k")
+    ask.add_argument(
+        "--dimension",
+        type=_positive_int,
+        default=None,
+        help="Validate a HashingEmbedding dimension (default: derive it safely from the index manifest)",
+    )
     ask.add_argument("--openai-model", default=None, help="Use OpenAI for generation when provided")
     ask.add_argument("--json", action="store_true", help="Return JSON")
     ask.add_argument("--include-prompt", action="store_true", help="Include full prompt in trace JSON")
@@ -88,8 +167,13 @@ def main(argv: list[str] | None = None) -> int:
     evaluate = sub.add_parser("eval", help="Evaluate retrieval from a JSONL dataset")
     evaluate.add_argument("dataset", help="JSONL with query and expected_doc_ids")
     evaluate.add_argument("--index", default=".cheragh_index")
-    evaluate.add_argument("--top-k", type=int, default=5)
-    evaluate.add_argument("--dimension", type=int, default=384)
+    evaluate.add_argument("--top-k", type=_positive_int, default=5)
+    evaluate.add_argument(
+        "--dimension",
+        type=_positive_int,
+        default=None,
+        help="Validate a HashingEmbedding dimension (default: derive it safely from the index manifest)",
+    )
 
     inspect = sub.add_parser("inspect-index", help="Inspect a local vector index")
     inspect.add_argument("--index", default=".cheragh_index")
@@ -116,8 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     technique_show.add_argument("--json", action="store_true")
 
     serve = sub.add_parser("serve", help="Serve a RAG API with FastAPI")
-    serve.add_argument("--config", default=None)
-    serve.add_argument("--index", default=None)
+    serve_source = serve.add_mutually_exclusive_group(required=True)
+    serve_source.add_argument("--config", default=None)
+    serve_source.add_argument("--index", default=None)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument(
@@ -161,18 +246,49 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_index(args: argparse.Namespace) -> int:
+    if (args.path is None) == (args.config is None):
+        print("index requires exactly one source: PATH or --config CONFIG", file=sys.stderr, flush=True)
+        return 2
+
+    if args.config:
+        call_kwargs = {}
+        if args.output is not None:
+            call_kwargs["output"] = args.output
+        if args.dimension is not None:
+            call_kwargs["embedding_model"] = HashingEmbedding(dimension=args.dimension)
+        config_overrides = {
+            "chunk_size": args.chunk_size,
+            "chunk_overlap": args.chunk_overlap,
+            "incremental": args.incremental,
+            "dry_run": args.dry_run,
+            "force": args.force,
+            "exclude_patterns": args.exclude,
+            "max_file_size_mb": args.max_file_size_mb,
+            "use_lock": args.use_lock,
+            "lock_timeout_seconds": args.lock_timeout_seconds,
+        }
+        call_kwargs.update({key: value for key, value in config_overrides.items() if value is not None})
+        try:
+            result = index_from_config(args.config, **call_kwargs)
+        except Exception as exc:
+            print(f"Invalid index configuration: {exc}", file=sys.stderr, flush=True)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+        return 0
+
     result = build_index(
         args.path,
-        args.output,
-        embedding_model=HashingEmbedding(dimension=args.dimension),
-        chunk_size=args.chunk_size,
-        chunk_overlap=args.chunk_overlap,
-        incremental=args.incremental,
-        dry_run=args.dry_run,
-        force=args.force,
+        args.output if args.output is not None else ".cheragh_index",
+        embedding_model=HashingEmbedding(dimension=args.dimension if args.dimension is not None else 384),
+        chunk_size=args.chunk_size if args.chunk_size is not None else 800,
+        chunk_overlap=args.chunk_overlap if args.chunk_overlap is not None else 120,
+        incremental=args.incremental if args.incremental is not None else True,
+        dry_run=args.dry_run if args.dry_run is not None else False,
+        force=args.force if args.force is not None else False,
         exclude_patterns=args.exclude,
-        max_file_size_mb=args.max_file_size_mb,
-        use_lock=args.use_lock,
+        max_file_size_mb=args.max_file_size_mb if args.max_file_size_mb is not None else 50,
+        use_lock=args.use_lock if args.use_lock is not None else True,
+        lock_timeout_seconds=args.lock_timeout_seconds if args.lock_timeout_seconds is not None else 10.0,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return 0
@@ -180,14 +296,18 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 def _cmd_ask(args: argparse.Namespace) -> int:
     if args.config:
+        if args.dimension is not None or args.openai_model is not None:
+            print("--dimension and --openai-model can only be used with --index", file=sys.stderr, flush=True)
+            return 2
         engine = RAGEngine.from_config(args.config)
         if args.trace_output:
             engine.trace_export_path = Path(args.trace_output)
     else:
-        embedder = HashingEmbedding(dimension=args.dimension)
-        store = MemoryVectorStore.load(args.index, embedder)
+        embedder = HashingEmbedding(dimension=args.dimension) if args.dimension is not None else None
+        store = MemoryVectorStore.load(args.index or ".cheragh_index", embedder)
         llm = OpenAILLMClient(model=args.openai_model) if args.openai_model else ExtractiveLLMClient()
-        engine = RAGEngine(store.as_retriever(), llm_client=llm, top_k=args.top_k or 5, trace_export_path=args.trace_output)
+        effective_top_k = args.top_k if args.top_k is not None else 5
+        engine = RAGEngine(store.as_retriever(), llm_client=llm, top_k=effective_top_k, trace_export_path=args.trace_output)
     response = engine.ask(args.question, top_k=args.top_k)
     if args.json:
         data = response.to_dict(include_prompt=args.include_prompt)
@@ -203,7 +323,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
-    embedder = HashingEmbedding(dimension=args.dimension)
+    embedder = HashingEmbedding(dimension=args.dimension) if args.dimension is not None else None
     store = MemoryVectorStore.load(args.index, embedder)
     examples = []
     with Path(args.dataset).open("r", encoding="utf-8") as f:
@@ -292,9 +412,6 @@ def _cmd_techniques(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    if not args.config and not args.index:
-        print("serve requires --config or --index", file=sys.stderr, flush=True)
-        return 1
     from ..server.main import serve
 
     serve(

@@ -8,8 +8,9 @@ from typing import Iterable, Optional
 
 import numpy as np
 
-from ..base import BaseRetriever, Document, EmbeddingModel
-from .memory import _document_from_dict, _document_to_dict
+from ..base import BaseRetriever, Document, EmbeddingModel, _snapshot_documents, _validate_top_k
+from ..filters import metadata_matches
+from .memory import _document_from_dict, _document_to_dict, _validate_embedding_model
 
 
 def require_faiss():
@@ -35,7 +36,7 @@ class FaissVectorStore:
         self.dimension: int | None = None
 
     def add_documents(self, documents: Iterable[Document]) -> None:
-        docs = list(documents)
+        docs = _snapshot_documents(documents)
         if not docs:
             return
         vectors = np.asarray(self.embedding_model.embed_documents([doc.content for doc in docs]), dtype=np.float32)
@@ -52,9 +53,12 @@ class FaissVectorStore:
         self.documents.extend(docs)
 
     def similarity_search(self, query: str, top_k: int = 5, filters: Optional[dict] = None) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         if not self.documents or self.index is None:
             return []
         candidate_indices = self._matching_indices(filters)
+        if not candidate_indices:
+            return []
         q = np.asarray(self.embedding_model.embed_query(query), dtype=np.float32)[np.newaxis, :]
         q = self._normalize(q) if self.normalize else q
         # Fast path without metadata filtering.
@@ -100,32 +104,24 @@ class FaissVectorStore:
         faiss = require_faiss()
         p = Path(path)
         manifest = json.loads((p / "manifest.json").read_text(encoding="utf-8"))
+        _validate_embedding_model(manifest, embedding_model)
         store = cls(embedding_model=embedding_model, normalize=bool(manifest.get("normalize", True)))
         store.index = faiss.read_index(str(p / "index.faiss"))
         store.dimension = int(manifest["dimension"])
+        if int(getattr(store.index, "d", store.dimension)) != store.dimension:
+            raise ValueError("FAISS store is corrupted: manifest dimension != index dimension")
         with (p / "documents.jsonl").open("r", encoding="utf-8") as f:
             store.documents = [_document_from_dict(json.loads(line)) for line in f if line.strip()]
         if len(store.documents) != store.index.ntotal:
             raise ValueError("FAISS store is corrupted: document count != index count")
+        if int(manifest.get("count", -1)) != len(store.documents):
+            raise ValueError("FAISS store is corrupted: manifest count != document count")
         return store
 
     def _matching_indices(self, filters: Optional[dict]) -> list[int]:
         if not filters:
             return list(range(len(self.documents)))
-        matches: list[int] = []
-        for idx, doc in enumerate(self.documents):
-            ok = True
-            for key, expected in filters.items():
-                actual = doc.metadata.get(key)
-                if isinstance(expected, (list, tuple, set)):
-                    ok = actual in expected
-                else:
-                    ok = actual == expected
-                if not ok:
-                    break
-            if ok:
-                matches.append(idx)
-        return matches
+        return [idx for idx, doc in enumerate(self.documents) if metadata_matches(doc.metadata, filters)]
 
     def _result(self, idx: int, score: float) -> Document:
         doc = self.documents[idx]

@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from typing import List
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 NOTE_TAKING_PROMPT_FR = """Tu prends des notes sur un extrait de document pour répondre à une question.
@@ -80,6 +80,7 @@ class ChainOfNoteRetriever(BaseRetriever):
         self.fetch_multiplier = max(1, fetch_multiplier)
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         candidates = self.base_retriever.retrieve(
             query, top_k=top_k * self.fetch_multiplier
         )

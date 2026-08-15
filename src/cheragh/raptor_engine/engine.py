@@ -10,7 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from ..base import BaseRetriever, Document, EmbeddingModel, ExtractiveLLMClient, HashingEmbedding, LLMClient, cosine_similarity
+from ..base import (
+    BaseRetriever,
+    Document,
+    EmbeddingModel,
+    ExtractiveLLMClient,
+    HashingEmbedding,
+    LLMClient,
+    _validate_top_k,
+    cosine_similarity,
+)
 from ..engine import RAGEngine, RAGResponse
 from ..vectorstores import MemoryVectorStore
 
@@ -74,6 +83,7 @@ class RAPTORRetrieverV2(BaseRetriever):
         self.retriever = self.store.as_retriever()
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         docs = self.retriever.retrieve(query, top_k=top_k)
         for doc in docs:
             doc.metadata = {**doc.metadata, "retrieval_method": "raptor"}
@@ -116,11 +126,14 @@ class RAPTOREngine:
         return cls(documents, **kwargs)
 
     def ask(self, query: str, top_k: int | None = None, **generate_kwargs: Any) -> RAGResponse:
+        if top_k is not None:
+            top_k = _validate_top_k(top_k)
         response = self.engine.ask(query, top_k=top_k, **generate_kwargs)
         response.metadata.update({"architecture": "raptor", "raptor_index": self.index.to_dict()})
         return response
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         return self.retriever.retrieve(query, top_k=top_k)
 
     def build_index(self, documents: list[Document]) -> RAPTORIndex:

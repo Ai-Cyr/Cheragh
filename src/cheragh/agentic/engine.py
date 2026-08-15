@@ -19,7 +19,7 @@ import json
 import re
 from typing import Any, Callable, Iterable, Protocol, Sequence
 
-from ..base import BaseRetriever, Document, LLMClient
+from ..base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 _TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -79,8 +79,7 @@ class ToolRegistry:
     """Explicit allow-list and sole execution boundary for agent tools."""
 
     def __init__(self, tools: Iterable[AgentTool] = (), *, max_input_chars: int = 8_000):
-        if max_input_chars <= 0:
-            raise ValueError("max_input_chars must be > 0")
+        max_input_chars = _validate_top_k(max_input_chars, name="max_input_chars")
         self.max_input_chars = max_input_chars
         self._tools: dict[str, AgentTool] = {}
         for tool in tools:
@@ -227,8 +226,7 @@ class LLMJSONPlanner:
     """
 
     def __init__(self, llm_client: LLMClient, *, max_history_chars: int = 12_000):
-        if max_history_chars <= 0:
-            raise ValueError("max_history_chars must be > 0")
+        max_history_chars = _validate_top_k(max_history_chars, name="max_history_chars")
         self.llm_client = llm_client
         self.max_history_chars = max_history_chars
 
@@ -266,10 +264,8 @@ class RetrievalToolAdapter:
     """Expose a retriever as a bounded, serializable agent tool."""
 
     def __init__(self, retriever: BaseRetriever, *, top_k: int = 5, max_document_chars: int = 2_000):
-        if top_k <= 0:
-            raise ValueError("top_k must be > 0")
-        if max_document_chars <= 0:
-            raise ValueError("max_document_chars must be > 0")
+        top_k = _validate_top_k(top_k)
+        max_document_chars = _validate_top_k(max_document_chars, name="max_document_chars")
         self.retriever = retriever
         self.top_k = top_k
         self.max_document_chars = max_document_chars
@@ -356,8 +352,7 @@ class AgenticRAGEngine:
         limit_answer: str = "Je ne sais pas : la limite d'étapes de l'agent a été atteinte.",
         planner_error_answer: str = "Je ne sais pas : le planificateur n'a pas produit d'action valide.",
     ):
-        if max_steps <= 0:
-            raise ValueError("max_steps must be > 0")
+        max_steps = _validate_top_k(max_steps, name="max_steps")
         self.planner = planner
         self.registry = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
         self.max_steps = max_steps

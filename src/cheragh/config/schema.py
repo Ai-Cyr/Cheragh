@@ -11,7 +11,73 @@ except ImportError as exc:  # pragma: no cover - dependency guard
 
 
 class StrictBaseModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+
+_RETRIEVER_TYPES = {"hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}
+_VECTORSTORE_TYPES = {"hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}
+_EMBEDDING_PROVIDERS = {
+    "hashing",
+    "local-hash",
+    "sentence-transformers",
+    "sentence-transformer",
+    "openai",
+    "azure-openai",
+    "azure",
+    "cohere",
+    "voyage",
+}
+_GENERATION_PROVIDERS = {
+    "extractive",
+    "none",
+    "local",
+    "openai",
+    "openai-chat",
+    "azure-openai",
+    "azure",
+    "anthropic",
+    "ollama",
+    "litellm",
+}
+_RERANKER_PROVIDERS = {
+    "cross-encoder",
+    "crossencoder",
+    "sentence-transformers",
+    "keyword",
+    "keyword-overlap",
+    "local",
+    "cohere",
+}
+_COMPRESSION_TYPES = {
+    "default",
+    "pipeline",
+    "extractive",
+    "sentence",
+    "sentences",
+    "redundancy",
+    "dedupe",
+    "redundancy-filter",
+}
+_QUERY_TRANSFORM_TYPES = {
+    "identity",
+    "none",
+    "multi-query",
+    "multiquery",
+    "multi",
+    "step-back",
+    "stepback",
+}
+
+
+def _normalize_choice(value: str) -> str:
+    return value.lower().replace("_", "-")
+
+
+def _validated_choice(value: str, *, supported: set[str], label: str) -> str:
+    normalized = _normalize_choice(value)
+    if normalized not in supported:
+        raise ValueError(f"Unsupported {label}: {normalized}")
+    return normalized
 
 
 class IngestionConfig(StrictBaseModel):
@@ -40,7 +106,13 @@ class EmbeddingConfig(StrictBaseModel):
     @field_validator("provider")
     @classmethod
     def normalize_provider(cls, value: str) -> str:
-        return value.lower().replace("_", "-")
+        return _validated_choice(value, supported=_EMBEDDING_PROVIDERS, label="embedding provider")
+
+    @model_validator(mode="after")
+    def validate_provider_requirements(self) -> "EmbeddingConfig":
+        if self.provider in {"azure-openai", "azure"} and not self.model:
+            raise ValueError("embedding.model is required for the Azure OpenAI provider")
+        return self
 
 
 class RetrieverConfig(StrictBaseModel):
@@ -53,12 +125,11 @@ class RetrieverConfig(StrictBaseModel):
     @field_validator("type")
     @classmethod
     def normalize_type(cls, value: str) -> str:
-        return value.lower().replace("_", "-")
+        return _validated_choice(value, supported=_RETRIEVER_TYPES, label="retriever type")
 
     @field_validator("tokenizer")
     @classmethod
     def validate_tokenizer_options(cls, value: dict[str, Any]) -> dict[str, Any]:
-        aliases = {"normalize_accents": "strip_accents"}
         allowed = {
             "lowercase",
             "strip_accents",
@@ -68,10 +139,54 @@ class RetrieverConfig(StrictBaseModel):
             "min_token_length",
             "use_default_stopwords",
         }
-        normalized = {aliases.get(key, key): item for key, item in value.items()}
+        normalized = dict(value)
+        if "normalize_accents" in normalized:
+            alias_value = normalized.pop("normalize_accents")
+            if "strip_accents" in normalized and normalized["strip_accents"] != alias_value:
+                raise ValueError("retriever.tokenizer normalize_accents conflicts with strip_accents")
+            normalized.setdefault("strip_accents", alias_value)
         unknown = set(normalized) - allowed
         if unknown:
             raise ValueError(f"Unsupported retriever.tokenizer options: {', '.join(sorted(unknown))}")
+
+        for key in ("lowercase", "strip_accents", "keep_hyphenated", "use_default_stopwords"):
+            if key in normalized and not isinstance(normalized[key], bool):
+                raise ValueError(f"retriever.tokenizer.{key} must be a boolean")
+
+        if "min_token_length" in normalized:
+            minimum = normalized["min_token_length"]
+            if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+                raise ValueError("retriever.tokenizer.min_token_length must be an integer >= 1")
+
+        if "ngram_range" in normalized:
+            ngram_range = normalized["ngram_range"]
+            if not isinstance(ngram_range, (list, tuple)) or len(ngram_range) != 2:
+                raise ValueError("retriever.tokenizer.ngram_range must contain exactly two integers")
+            minimum, maximum = ngram_range
+            if (
+                isinstance(minimum, bool)
+                or isinstance(maximum, bool)
+                or not isinstance(minimum, int)
+                or not isinstance(maximum, int)
+                or minimum < 1
+                or minimum > maximum
+            ):
+                raise ValueError("retriever.tokenizer.ngram_range must be like [1, 2]")
+            normalized["ngram_range"] = [minimum, maximum]
+
+        if "stopwords" in normalized:
+            stopwords = normalized["stopwords"]
+            if stopwords is None:
+                raise ValueError("retriever.tokenizer.stopwords cannot be null; use [] to disable them")
+            if isinstance(stopwords, (str, bytes)) or not isinstance(stopwords, (list, tuple, set, frozenset)):
+                raise ValueError("retriever.tokenizer.stopwords must be a collection of strings")
+            if not all(isinstance(item, str) for item in stopwords):
+                raise ValueError("retriever.tokenizer.stopwords must contain only strings")
+            if "use_default_stopwords" in normalized:
+                raise ValueError(
+                    "retriever.tokenizer.stopwords and use_default_stopwords are mutually exclusive"
+                )
+            normalized["stopwords"] = list(stopwords)
         return normalized
 
 
@@ -86,7 +201,9 @@ class VectorStoreConfig(StrictBaseModel):
     @field_validator("type")
     @classmethod
     def normalize_type(cls, value: str | None) -> str | None:
-        return value.lower().replace("_", "-") if value else None
+        if value is None:
+            return None
+        return _validated_choice(value, supported=_VECTORSTORE_TYPES, label="vectorstore type")
 
 
 class RerankerConfig(StrictBaseModel):
@@ -95,11 +212,56 @@ class RerankerConfig(StrictBaseModel):
     model: str | None = None
     first_stage_top_k: int = Field(default=30, ge=1, le=10_000)
 
+    @field_validator("provider")
+    @classmethod
+    def normalize_provider(cls, value: str) -> str:
+        return _validated_choice(value, supported=_RERANKER_PROVIDERS, label="reranker provider")
+
 
 class ToggleTypeConfig(StrictBaseModel):
     enabled: bool = False
     type: str = "default"
     transform: str | None = None
+
+
+class CompressionConfig(ToggleTypeConfig):
+    @field_validator("type")
+    @classmethod
+    def normalize_type(cls, value: str) -> str:
+        return _validated_choice(value, supported=_COMPRESSION_TYPES, label="compression type")
+
+    @model_validator(mode="after")
+    def validate_transform(self) -> "CompressionConfig":
+        if self.transform is not None:
+            raise ValueError("compression.transform is unsupported; use compression.type")
+        return self
+
+
+class QueryConfig(ToggleTypeConfig):
+    type: str = "multi-query"
+
+    @field_validator("type")
+    @classmethod
+    def normalize_type(cls, value: str) -> str:
+        return _validated_choice(value, supported=_QUERY_TRANSFORM_TYPES, label="query transform type")
+
+    @field_validator("transform")
+    @classmethod
+    def normalize_transform(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validated_choice(value, supported=_QUERY_TRANSFORM_TYPES, label="query transform")
+
+    @model_validator(mode="after")
+    def validate_selector_aliases(self) -> "QueryConfig":
+        if (
+            "type" in self.model_fields_set
+            and "transform" in self.model_fields_set
+            and self.transform is not None
+            and self.type != self.transform
+        ):
+            raise ValueError("query.type and query.transform conflict; configure only one selector")
+        return self
 
 
 class GenerationConfig(StrictBaseModel):
@@ -113,7 +275,13 @@ class GenerationConfig(StrictBaseModel):
     @field_validator("provider")
     @classmethod
     def normalize_provider(cls, value: str) -> str:
-        return value.lower().replace("_", "-")
+        return _validated_choice(value, supported=_GENERATION_PROVIDERS, label="generation provider")
+
+    @model_validator(mode="after")
+    def validate_provider_requirements(self) -> "GenerationConfig":
+        if self.provider in {"azure-openai", "azure", "litellm"} and not self.model:
+            raise ValueError(f"generation.model is required for the {self.provider} provider")
+        return self
 
 
 class CacheConfig(StrictBaseModel):
@@ -143,6 +311,9 @@ class CacheConfig(StrictBaseModel):
     def normalize_backend_alias(cls, data: Any) -> Any:
         if isinstance(data, dict):
             data = dict(data)
+            for key in ("backend", "type"):
+                if isinstance(data.get(key), str):
+                    data[key] = data[key].lower().replace("_", "-")
             if data.get("backend") is None and data.get("type") is not None:
                 data["backend"] = data["type"]
         return data
@@ -150,6 +321,12 @@ class CacheConfig(StrictBaseModel):
     @model_validator(mode="after")
     def validate_pickle_safety(self) -> "CacheConfig":
         backend = self.backend.replace("_", "-")
+        aliases = {"mem": "memory", "in-memory": "memory", "sqlite3": "sqlite"}
+        if self.type is not None:
+            configured_type = aliases.get(self.type, self.type)
+            configured_backend = aliases.get(backend, backend)
+            if configured_type != configured_backend:
+                raise ValueError("cache.backend and cache.type conflict; configure only one selector")
         if self.serializer == "signed-pickle" and not (self.secret_key or self.hmac_key):
             raise ValueError("cache.serializer='signed-pickle' requires cache.secret_key or cache.hmac_key")
         if backend in {"sqlite", "sqlite3", "redis"} and self.serializer == "pickle":
@@ -185,8 +362,8 @@ class RAGConfig(StrictBaseModel):
     retriever: RetrieverConfig = Field(default_factory=RetrieverConfig)
     vectorstore: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
     reranker: RerankerConfig = Field(default_factory=RerankerConfig)
-    compression: ToggleTypeConfig = Field(default_factory=ToggleTypeConfig)
-    query: ToggleTypeConfig = Field(default_factory=lambda: ToggleTypeConfig(type="multi-query"))
+    compression: CompressionConfig = Field(default_factory=CompressionConfig)
+    query: QueryConfig = Field(default_factory=QueryConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
@@ -223,10 +400,17 @@ class RAGConfig(StrictBaseModel):
     def validate_retriever_vectorstore(self) -> "RAGConfig":
         retriever_type = self.retriever.type
         vector_type = self.vectorstore.type
-        supported = {"hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}
-        effective_type = vector_type or retriever_type
-        if effective_type not in supported:
-            raise ValueError(f"Unsupported retriever/vectorstore type: {effective_type}")
+        retriever_type_was_explicit = "type" in self.retriever.model_fields_set
+        vector_type_was_explicit = "type" in self.vectorstore.model_fields_set and vector_type is not None
+        aliases = {"vector": "memory"}
+        if (
+            retriever_type_was_explicit
+            and vector_type_was_explicit
+            and aliases.get(retriever_type, retriever_type) != aliases.get(vector_type, vector_type)
+        ):
+            raise ValueError(
+                "retriever.type and vectorstore.type conflict; configure one selector or use matching values"
+            )
         return self
 
     def to_legacy_dict(self) -> dict[str, Any]:

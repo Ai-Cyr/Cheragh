@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 DECOMPOSITION_PROMPT_FR = """Décompose la question complexe suivante en {max_subquestions} sous-questions atomiques, indépendantes et simples à répondre.
@@ -62,6 +62,7 @@ class QueryDecompositionRetriever(BaseRetriever):
         self.per_subquestion_top_k = per_subquestion_top_k
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         # 1) Décomposition
         subquestions = self._decompose(query)
 

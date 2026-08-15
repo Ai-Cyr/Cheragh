@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
-from .base import BaseRetriever, Document, _tokenize
+from .base import BaseRetriever, Document, _tokenize, _validate_top_k
 
 
 class BaseReranker(ABC):
@@ -39,6 +39,7 @@ class CrossEncoderReranker(BaseReranker):
         self.model = model
 
     def rerank(self, query: str, documents: Sequence[Document], top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         if not documents:
             return []
         pairs = [(query, doc.content) for doc in documents]
@@ -55,6 +56,7 @@ class KeywordOverlapReranker(BaseReranker):
     """
 
     def rerank(self, query: str, documents: Sequence[Document], top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         query_tokens = set(_tokenize(query))
         scored: list[tuple[Document, float]] = []
         for doc in documents:
@@ -82,6 +84,7 @@ class CohereReranker(BaseReranker):
         self.model = model
 
     def rerank(self, query: str, documents: Sequence[Document], top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         if not documents:
             return []
         response = self.client.rerank(query=query, documents=[doc.content for doc in documents], top_n=top_k, model=self.model)
@@ -103,9 +106,11 @@ class ReciprocalRankFusionReranker(BaseReranker):
         self.k = k
 
     def rerank(self, query: str, documents: Sequence[Document], top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         return list(documents)[:top_k]
 
     def fuse(self, ranked_lists: Iterable[Sequence[Document]], top_k: int = 5) -> list[Document]:
+        top_k = _validate_top_k(top_k)
         scores: dict[str, float] = {}
         docs_by_key: dict[str, Document] = {}
         for ranked in ranked_lists:
@@ -136,6 +141,7 @@ class RerankingRetriever(BaseRetriever):
         self.first_stage_top_k = first_stage_top_k
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         candidates = self.base_retriever.retrieve(query, top_k=max(self.first_stage_top_k, top_k))
         return self.reranker.rerank(query, candidates, top_k=top_k)
 

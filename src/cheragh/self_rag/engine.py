@@ -18,7 +18,14 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable, Protocol
 
-from ..base import BaseRetriever, Document, ExtractiveLLMClient, LLMClient
+from ..base import (
+    BaseRetriever,
+    Document,
+    ExtractiveLLMClient,
+    LLMClient,
+    _validate_non_negative_int,
+    _validate_top_k,
+)
 
 
 def _clamp_score(value: float) -> float:
@@ -388,10 +395,8 @@ class SelfRAGEngine:
             "Je ne sais pas : les éléments récupérés ne sont pas suffisamment pertinents."
         ),
     ):
-        if top_k <= 0:
-            raise ValueError("top_k must be > 0")
-        if max_refinements < 0:
-            raise ValueError("max_refinements must be >= 0")
+        top_k = _validate_top_k(top_k)
+        max_refinements = _validate_non_negative_int(max_refinements, name="max_refinements")
         self.retriever = retriever
         self.llm_client = llm_client or ExtractiveLLMClient()
         self.retrieval_gate = retrieval_gate or AlwaysRetrieveGate()
@@ -404,9 +409,7 @@ class SelfRAGEngine:
         query = " ".join(query.split())
         if not query:
             raise ValueError("query must not be empty")
-        selected_top_k = top_k if top_k is not None else self.top_k
-        if selected_top_k <= 0:
-            raise ValueError("top_k must be > 0")
+        selected_top_k = self.top_k if top_k is None else _validate_top_k(top_k)
 
         retrieval = self.retrieval_gate.decide(query)
         if not isinstance(retrieval, RetrievalDecision):

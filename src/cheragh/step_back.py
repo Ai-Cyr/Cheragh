@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 STEP_BACK_PROMPT_FR = """Reformule la question spécifique suivante en une question plus générale et plus abstraite
@@ -69,6 +69,7 @@ class StepBackRetriever(BaseRetriever):
         self.n_stepback = n_stepback
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         # 1) Génération de la question step-back
         stepback_query = self._generate_stepback(query)
 

@@ -5,8 +5,17 @@ from pathlib import Path
 import asyncio
 from typing import Any, Generator, Iterable, Iterator
 
-from .base import BaseRetriever, Document, EmbeddingModel, ExtractiveLLMClient, HashingEmbedding, LLMClient, OpenAILLMClient
-from .citations import citation_location, extract_citations, validate_citations
+from .base import (
+    BaseRetriever,
+    Document,
+    EmbeddingModel,
+    ExtractiveLLMClient,
+    HashingEmbedding,
+    LLMClient,
+    OpenAILLMClient,
+    _validate_top_k,
+)
+from .citations import extract_citations, validate_citations
 from .hybrid_search import HybridSearchRetriever
 from .schema import RAGResponse, Source
 from .ingestion import chunk_documents, ingest_path
@@ -84,13 +93,17 @@ class RAGEngine:
         self.retriever = retriever
         self.llm_client = llm_client or ExtractiveLLMClient()
         self.answer_prompt = answer_prompt
-        self.top_k = top_k
+        self.top_k = _validate_top_k(top_k)
         self.strict_grounding = strict_grounding
         self.min_score = min_score
         self.require_citations = strict_grounding if require_citations is None else require_citations
         self.flag_unsourced_sentences = flag_unsourced_sentences
         self.compressor = _build_compressor(compressor)
-        self.query_transformer = build_query_transformer(query_transformer) if isinstance(query_transformer, str) or query_transformer is None else query_transformer
+        self.query_transformer = (
+            build_query_transformer(query_transformer, llm_client=self.llm_client)
+            if isinstance(query_transformer, str)
+            else query_transformer
+        )
         self.trace_enabled = trace_enabled
         self.cache_backend = cache_backend
         self.cache_config = cache_config or {}
@@ -118,11 +131,18 @@ class RAGEngine:
         query_transformer: QueryTransformer | str | None = None,
         **kwargs: Any,
     ) -> "RAGEngine":
-        cache_backend = kwargs.get("cache_backend") or build_cache_backend(_cache_config_from_kwargs(kwargs))
+        _validate_from_documents_kwargs(kwargs)
+        top_k = _validate_top_k(top_k)
         cache_cfg = _normalize_cache_config(kwargs.get("cache_config") or _cache_config_from_kwargs(kwargs))
+        cache_backend = _resolve_cache_backend(kwargs.get("cache_backend"), cache_cfg)
         embedder = embedding_model or HashingEmbedding()
         if cache_backend is not None and cache_cfg.get("cache_embeddings", True):
-            embedder = CachedEmbeddingModel(embedder, cache_backend, ttl=cache_cfg.get("ttl"), namespace=cache_cfg.get("embedding_namespace", "embeddings"))
+            embedder = CachedEmbeddingModel(
+                embedder,
+                cache_backend,
+                ttl=cache_cfg.get("ttl"),
+                namespace=_cache_layer_namespace(cache_cfg, "embedding"),
+            )
         docs = list(documents)
         if chunk:
             docs = chunk_documents(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
@@ -138,23 +158,44 @@ class RAGEngine:
         if reranker:
             reranker_obj = build_reranker(provider=reranker, model=reranker_model) if isinstance(reranker, str) else reranker
             if cache_backend is not None and cache_cfg.get("cache_reranking", True):
-                reranker_obj = CachedReranker(reranker_obj, cache_backend, ttl=cache_cfg.get("ttl"), namespace=cache_cfg.get("reranking_namespace", "reranking"))
+                reranker_obj = CachedReranker(
+                    reranker_obj,
+                    cache_backend,
+                    ttl=cache_cfg.get("ttl"),
+                    namespace=_cache_layer_namespace(cache_cfg, "reranking"),
+                )
             retriever = RerankingRetriever(
                 retriever,
                 first_stage_top_k=max(first_stage_top_k, top_k),
                 reranker=reranker_obj,
             )
         if cache_backend is not None and cache_cfg.get("cache_retrieval", True):
-            retriever = CachedRetriever(retriever, cache_backend, ttl=cache_cfg.get("ttl"), namespace=cache_cfg.get("retrieval_namespace", "retrieval"))
+            retriever = CachedRetriever(
+                retriever,
+                cache_backend,
+                ttl=cache_cfg.get("ttl"),
+                namespace=_cache_layer_namespace(cache_cfg, "retrieval"),
+            )
         effective_llm = llm_client
         if cache_backend is not None and effective_llm is not None and cache_cfg.get("cache_llm", True):
-            effective_llm = CachedLLMClient(effective_llm, cache_backend, ttl=cache_cfg.get("ttl"), namespace=cache_cfg.get("llm_namespace", "llm"))
+            effective_llm = CachedLLMClient(
+                effective_llm,
+                cache_backend,
+                ttl=cache_cfg.get("ttl"),
+                namespace=_cache_layer_namespace(cache_cfg, "llm"),
+            )
+        effective_query_transformer = query_transformer or kwargs.get("query_transformer")
+        if isinstance(effective_query_transformer, str):
+            effective_query_transformer = build_query_transformer(
+                effective_query_transformer,
+                llm_client=effective_llm,
+            )
         return cls(
             retriever=retriever,
             llm_client=effective_llm,
             top_k=top_k,
             compressor=compressor or kwargs.get("compressor"),
-            query_transformer=query_transformer or kwargs.get("query_transformer"),
+            query_transformer=effective_query_transformer,
             cache_backend=cache_backend,
             cache_config=cache_cfg,
             trace_export_path=kwargs.get("trace_export_path"),
@@ -180,7 +221,9 @@ class RAGEngine:
     def from_config(cls, config_path: str | Path, documents: Iterable[Document] | None = None) -> "RAGEngine":
         from .config import load_config
 
-        config = load_config(config_path)
+        config_file = Path(config_path).expanduser().resolve()
+        config_dir = config_file.parent
+        config = load_config(config_file)
         embedder = _embedding_from_config(config.get("embedding", {}))
         llm = _llm_from_config(config.get("generation", {}))
         retriever_cfg = config.get("retriever", {})
@@ -196,12 +239,17 @@ class RAGEngine:
             "path": config.get("cache_path"),
             "ttl": config.get("cache_ttl"),
         }))
+        if cache_cfg.get("path"):
+            cache_cfg["path"] = str(_resolve_config_path(config_dir, cache_cfg["path"]))
+        if cache_cfg.get("cache_path"):
+            cache_cfg["cache_path"] = str(_resolve_config_path(config_dir, cache_cfg["cache_path"]))
         cache_backend = build_cache_backend(cache_cfg) if cache_cfg.get("enabled", False) else None
 
         if documents is None:
             source_path = ingestion_cfg.get("path")
             if not source_path:
                 raise ValueError("Config must define ingestion.path when documents are not provided")
+            source_path = _resolve_config_path(config_dir, source_path)
             docs = ingest_path(
                 source_path,
                 chunk_size=int(ingestion_cfg.get("chunk_size", 800)),
@@ -230,7 +278,11 @@ class RAGEngine:
             min_score=config.get("min_score"),
             require_citations=config.get("require_citations"),
             flag_unsourced_sentences=bool(config.get("flag_unsourced_sentences", False)),
-            vectorstore_path=vectorstore_cfg.get("path"),
+            vectorstore_path=(
+                _resolve_config_path(config_dir, vectorstore_cfg["path"])
+                if vectorstore_cfg.get("path")
+                else None
+            ),
             collection_name=vectorstore_cfg.get("collection_name", "cheragh"),
             qdrant_url=vectorstore_cfg.get("url"),
             qdrant_api_key=vectorstore_cfg.get("api_key"),
@@ -246,14 +298,18 @@ class RAGEngine:
             trace_enabled=bool(config.get("trace_enabled", True)) and bool(observability_cfg.get("enabled", True)),
             cache_backend=cache_backend,
             cache_config=cache_cfg,
-            trace_export_path=observability_cfg.get("trace_export_path"),
+            trace_export_path=(
+                _resolve_config_path(config_dir, observability_cfg["trace_export_path"])
+                if observability_cfg.get("trace_export_path")
+                else None
+            ),
             trace_include_prompt=bool(observability_cfg.get("trace_include_prompt", False)),
             trace_pricing=observability_cfg.get("pricing"),
         )
 
     def ask(self, query: str, top_k: int | None = None, **generate_kwargs: Any) -> RAGResponse:
         trace = RAGTrace(query=query) if self.trace_enabled else None
-        effective_top_k = top_k or self.top_k
+        effective_top_k = self._effective_top_k(top_k)
 
         query_variants = self._query_variants(query, trace)
         step = trace.start_step("retrieval", query_count=len(query_variants), top_k=effective_top_k) if trace else None
@@ -279,17 +335,7 @@ class RAGEngine:
                 step.finish(before_chars=before_chars, after_chars=after_chars, document_count=len(docs))
 
         if self.strict_grounding and not docs:
-            return RAGResponse(
-                query=query,
-                answer="Je ne sais pas : aucun extrait suffisamment pertinent n'a été trouvé.",
-                sources=[],
-                retrieved_documents=[],
-                prompt="",
-                metadata={"strict_grounding": True},
-                warnings=["no_relevant_documents"],
-                grounded_score=0.0,
-                trace=self._finalize_trace(trace, answer="", prompt=""),
-            )
+            return self._strict_no_context_response(query, effective_top_k, trace)
 
         context = AdvancedRAGPipeline._format_context(docs)
         prompt = self.answer_prompt.format(context=context, query=query)
@@ -316,7 +362,7 @@ class RAGEngine:
         return RAGResponse(
             query=query,
             answer=answer,
-            sources=[Source(doc.doc_id, doc.score, doc.content[:240], dict(doc.metadata), citation_location(doc)) for doc in docs],
+            sources=[Source.from_document(doc) for doc in docs],
             retrieved_documents=docs,
             prompt=prompt,
             metadata={"top_k": effective_top_k, "strict_grounding": self.strict_grounding, "cache": self.cache_backend.stats().to_dict() if self.cache_backend else None},
@@ -335,6 +381,46 @@ class RAGEngine:
         if self.trace_export_path is not None:
             append_trace_jsonl(self.trace_export_path, trace, include_prompt=self.trace_include_prompt)
         return trace
+
+    def _effective_top_k(self, top_k: int | None) -> int:
+        return self.top_k if top_k is None else _validate_top_k(top_k)
+
+    def _strict_no_context_response(
+        self,
+        query: str,
+        effective_top_k: int,
+        trace: RAGTrace | None,
+    ) -> RAGResponse:
+        """Build the single no-context response used by sync and stream APIs."""
+
+        answer = "Je ne sais pas : aucun extrait suffisamment pertinent n'a été trouvé."
+        validation = validate_citations(
+            answer,
+            [],
+            require_citations=self.require_citations,
+            flag_unsourced_sentences=self.flag_unsourced_sentences,
+        )
+        # Citation coverage is vacuously 1.0 when no source IDs exist, but a
+        # strict-grounding fallback intentionally reports that no answer was
+        # grounded in retrieved evidence.
+        validation.grounded_score = 0.0
+        warnings = ["no_relevant_documents", *validation.warnings]
+        if trace:
+            trace.warnings.extend(warning for warning in warnings if warning not in trace.warnings)
+        return RAGResponse(
+            query=query,
+            answer=answer,
+            sources=[],
+            retrieved_documents=[],
+            prompt="",
+            metadata={"strict_grounding": True, "top_k": effective_top_k},
+            citations=validation.citations,
+            warnings=warnings,
+            grounded_score=validation.grounded_score,
+            unsourced_claims=validation.unsourced_claims,
+            citation_validation=validation,
+            trace=self._finalize_trace(trace, answer=answer, prompt=""),
+        )
 
     async def aask(self, query: str, top_k: int | None = None, **generate_kwargs: Any) -> RAGResponse:
         """Async wrapper for frameworks that need awaitable execution."""
@@ -362,7 +448,8 @@ class RAGEngine:
         non-breaking access to citations, warnings, sources and tracing.
         """
 
-        return RAGStream(self._stream_with_response(query, top_k=top_k, **generate_kwargs))
+        effective_top_k = self._effective_top_k(top_k)
+        return RAGStream(self._stream_with_response(query, top_k=effective_top_k, **generate_kwargs))
 
     def _stream_with_response(
         self,
@@ -371,7 +458,7 @@ class RAGEngine:
         **generate_kwargs: Any,
     ) -> Generator[str, None, RAGResponse]:
         trace = RAGTrace(query=query) if self.trace_enabled else None
-        effective_top_k = top_k or self.top_k
+        effective_top_k = self._effective_top_k(top_k)
 
         query_variants = self._query_variants(query, trace)
         step = trace.start_step("retrieval", query_count=len(query_variants), top_k=effective_top_k) if trace else None
@@ -399,28 +486,9 @@ class RAGEngine:
             if step:
                 step.finish(before_chars=before_chars, after_chars=after_chars, document_count=len(docs))
         if self.strict_grounding and not docs:
-            answer = "Je ne sais pas : aucun extrait suffisamment pertinent n'a été trouvé."
-            yield answer
-            validation = validate_citations(
-                answer,
-                [],
-                require_citations=self.require_citations,
-                flag_unsourced_sentences=self.flag_unsourced_sentences,
-            )
-            return RAGResponse(
-                query=query,
-                answer=answer,
-                sources=[],
-                retrieved_documents=[],
-                prompt="",
-                metadata={"strict_grounding": True},
-                citations=validation.citations,
-                warnings=["no_relevant_documents"],
-                grounded_score=0.0,
-                unsourced_claims=validation.unsourced_claims,
-                citation_validation=validation,
-                trace=self._finalize_trace(trace, answer=answer, prompt=""),
-            )
+            response = self._strict_no_context_response(query, effective_top_k, trace)
+            yield response.answer
+            return response
 
         context = AdvancedRAGPipeline._format_context(docs)
         prompt = self.answer_prompt.format(context=context, query=query)
@@ -486,10 +554,7 @@ class RAGEngine:
         return RAGResponse(
             query=query,
             answer=answer,
-            sources=[
-                Source(doc.doc_id, doc.score, doc.content[:240], dict(doc.metadata), citation_location(doc))
-                for doc in docs
-            ],
+            sources=[Source.from_document(doc) for doc in docs],
             retrieved_documents=docs,
             prompt=prompt,
             metadata={
@@ -604,6 +669,52 @@ def _engine_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {key: kwargs[key] for key in allowed if key in kwargs}
 
 
+_FROM_DOCUMENTS_KWARGS = {
+    "allow_unsafe_pickle",
+    "answer_prompt",
+    "cache_backend",
+    "cache_backend_name",
+    "cache_backend_type",
+    "cache_config",
+    "cache_embeddings",
+    "cache_enabled",
+    "cache_llm",
+    "cache_namespace",
+    "cache_path",
+    "cache_reranking",
+    "cache_retrieval",
+    "cache_ttl",
+    "collection_name",
+    "compressor",
+    "embedding_namespace",
+    "filters",
+    "flag_unsourced_sentences",
+    "llm_namespace",
+    "min_score",
+    "normalize",
+    "qdrant_api_key",
+    "qdrant_url",
+    "query_transformer",
+    "require_citations",
+    "reranking_namespace",
+    "retrieval_namespace",
+    "strict_grounding",
+    "tokenizer",
+    "tokenizer_config",
+    "trace_enabled",
+    "trace_export_path",
+    "trace_include_prompt",
+    "trace_pricing",
+}
+
+
+def _validate_from_documents_kwargs(kwargs: dict[str, Any]) -> None:
+    unknown = sorted(set(kwargs) - _FROM_DOCUMENTS_KWARGS)
+    if unknown:
+        rendered = ", ".join(repr(name) for name in unknown)
+        raise TypeError(f"RAGEngine.from_documents() got unexpected keyword argument(s): {rendered}")
+
+
 
 
 def _cache_config_from_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -617,6 +728,10 @@ def _cache_config_from_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "cache_ttl": "ttl",
         "cache_namespace": "namespace",
         "cache_enabled": "enabled",
+        "embedding_namespace": "embedding_namespace",
+        "retrieval_namespace": "retrieval_namespace",
+        "reranking_namespace": "reranking_namespace",
+        "llm_namespace": "llm_namespace",
     }
     if "cache_backend" in kwargs and isinstance(kwargs.get("cache_backend"), str):
         cfg["backend"] = kwargs["cache_backend"]
@@ -627,6 +742,50 @@ def _cache_config_from_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         if key in kwargs:
             cfg[key] = kwargs[key]
     return cfg
+
+
+def _resolve_config_path(config_dir: Path, value: str | Path) -> Path:
+    """Resolve filesystem paths relative to the configuration file."""
+
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else (config_dir / path).resolve()
+
+
+def _resolve_cache_backend(value: Any, config: dict[str, Any]) -> CacheBackend | None:
+    """Normalize the public cache shortcut to a concrete backend.
+
+    ``cache_backend`` historically accepted both an instantiated backend and a
+    provider name.  Treating a provider string as if it were a backend object
+    only failed later on the first cache access, so resolve it at construction
+    time and reject unrelated objects immediately.
+    """
+
+    if value is None:
+        return build_cache_backend(config)
+    if isinstance(value, CacheBackend):
+        return value
+    if isinstance(value, str):
+        named_config = dict(config)
+        named_config.update(enabled=True, backend=value)
+        return build_cache_backend(named_config)
+    raise TypeError("cache_backend must be a CacheBackend instance, provider name, or None")
+
+
+def _cache_layer_namespace(config: dict[str, Any], layer: str) -> str:
+    """Return an isolated namespace for one cache layer."""
+
+    defaults = {
+        "embedding": ("embedding_namespace", "embeddings"),
+        "retrieval": ("retrieval_namespace", "retrieval"),
+        "reranking": ("reranking_namespace", "reranking"),
+        "llm": ("llm_namespace", "llm"),
+    }
+    explicit_key, default_namespace = defaults[layer]
+    explicit = config.get(explicit_key)
+    if explicit not in {None, ""}:
+        return str(explicit)
+    base = str(config.get("namespace") or "default")
+    return default_namespace if base == "default" else f"{base}:{default_namespace}"
 
 
 def _normalize_cache_config(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -699,7 +858,14 @@ def _llm_from_config(config: dict[str, Any]) -> LLMClient:
     if provider in {"extractive", "none", "local"}:
         return ExtractiveLLMClient()
     if provider in {"openai", "openai-chat"}:
-        return OpenAILLMClient(model=str(config.get("model", "gpt-4o-mini")), api_key=config.get("api_key"))
+        client_kwargs = {}
+        if config.get("base_url"):
+            client_kwargs["base_url"] = config["base_url"]
+        return OpenAILLMClient(
+            model=str(config.get("model", "gpt-4o-mini")),
+            api_key=config.get("api_key"),
+            **client_kwargs,
+        )
     if provider in {"azure-openai", "azure"}:
         from .llms import AzureOpenAIChatClient
 

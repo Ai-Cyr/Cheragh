@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional
@@ -34,6 +35,48 @@ class Document:
     def __repr__(self) -> str:
         preview = self.content[:80].replace("\n", " ")
         return f"Document(id={self.doc_id}, score={self.score}, content='{preview}...')"
+
+
+def _snapshot_document(document: Document) -> Document:
+    """Return an index-safe copy of a caller-owned document.
+
+    In-memory indexes keep embeddings beside their documents. Retaining a
+    caller-owned ``Document`` would let later content or metadata mutations make
+    that pair inconsistent, so index boundaries take a defensive snapshot.
+    """
+
+    return Document(
+        content=document.content,
+        metadata=deepcopy(document.metadata or {}),
+        doc_id=document.doc_id,
+        score=document.score,
+    )
+
+
+def _snapshot_documents(documents: Iterable[Document]) -> list[Document]:
+    """Materialize independent snapshots of ``documents`` for an index."""
+
+    return [_snapshot_document(document) for document in documents]
+
+
+def _validate_top_k(top_k: Any, *, name: str = "top_k") -> int:
+    """Validate the shared positive-integer ``top_k`` contract."""
+
+    if isinstance(top_k, bool) or not isinstance(top_k, int):
+        raise TypeError(f"{name} must be an int")
+    if top_k <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return top_k
+
+
+def _validate_non_negative_int(value: Any, *, name: str) -> int:
+    """Validate a non-negative integer configuration value."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int")
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return value
 
 
 class EmbeddingModel(ABC):

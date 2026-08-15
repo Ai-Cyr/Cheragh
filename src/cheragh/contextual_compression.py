@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import List
 
-from .base import BaseRetriever, Document, LLMClient
+from .base import BaseRetriever, Document, LLMClient, _validate_top_k
 
 
 COMPRESSION_PROMPT_FR = """Tu reçois une question et un extrait de document.
@@ -67,6 +67,7 @@ class ContextualCompressionRetriever(BaseRetriever):
         self.min_compressed_length = min_compressed_length
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
+        top_k = _validate_top_k(top_k)
         # 1) Retrieval de départ — on prend un peu plus pour compenser les
         #    documents qui seront compressés en NO_OUTPUT et filtrés.
         retrieved = self.base_retriever.retrieve(query, top_k=top_k * 2)
