@@ -5,9 +5,12 @@ import unittest
 
 import cheragh
 from cheragh import (
+    AdaptiveRAGEngine,
     BM25Retriever,
+    ClaimEvaluator,
     CommunityGraphRAGEngine,
     ColPaliRetriever,
+    LongContextPacker,
     ReciprocalRankFusionRetriever,
     RetrievalTrainingPipeline,
     TemporalRetriever,
@@ -18,7 +21,7 @@ from cheragh.config import validate_config
 
 class ArchitectureCatalogueTests(unittest.TestCase):
     def test_every_catalogue_entry_is_available_and_public(self) -> None:
-        self.assertEqual(len(TECHNIQUES), 42)
+        self.assertEqual(len(TECHNIQUES), 44)
         self.assertEqual(list_techniques(status=TechniqueStatus.PLANNED), [])
 
         for technique in TECHNIQUES:
@@ -33,9 +36,12 @@ class ArchitectureCatalogueTests(unittest.TestCase):
 
     def test_new_architecture_boundaries_are_exported_from_root(self) -> None:
         for architecture in (
+            AdaptiveRAGEngine,
             BM25Retriever,
+            ClaimEvaluator,
             CommunityGraphRAGEngine,
             ColPaliRetriever,
+            LongContextPacker,
             ReciprocalRankFusionRetriever,
             RetrievalTrainingPipeline,
             TemporalRetriever,
@@ -69,9 +75,9 @@ class ArchitectureCatalogueTests(unittest.TestCase):
 
         self.assertEqual(counts[TechniqueStatus.STABLE], 6)
         self.assertEqual(counts[TechniqueStatus.BETA], 12)
-        self.assertEqual(counts[TechniqueStatus.EXPERIMENTAL], 24)
+        self.assertEqual(counts[TechniqueStatus.EXPERIMENTAL], 26)
         self.assertEqual(counts[TechniqueStatus.PLANNED], 0)
-        self.assertEqual(cheragh.__version__, "1.2.0")
+        self.assertEqual(cheragh.__version__, "1.3.0")
 
 
 if __name__ == "__main__":

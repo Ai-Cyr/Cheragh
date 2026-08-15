@@ -127,6 +127,18 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
     _spec("step-back", "Step-back prompting", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.StepBackRetriever", "Retrieve using a more abstract companion query."),
     _spec("query-decomposition", "Query decomposition", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.QueryDecompositionRetriever", "Split complex questions into retrievable sub-questions."),
     _spec("context-compression", "Contextual compression", TechniqueFamily.AUGMENTATION, TechniqueStatus.BETA, "cheragh.ContextualCompressionRetriever", "Retrieve, then remove irrelevant and redundant text through an injectable compression pipeline."),
+    _spec(
+        "long-context-packing",
+        "Long-context packing",
+        TechniqueFamily.AUGMENTATION,
+        TechniqueStatus.EXPERIMENTAL,
+        "cheragh.LongContextPacker",
+        "Pack scored evidence under a strict token budget with source quotas and boundary-aware ordering.",
+        references=("https://arxiv.org/abs/2406.15319",),
+        limitations=(
+            "Context-engineering component, not LongRAG's trained long reader; exact limits require the target model tokenizer.",
+        ),
+    ),
     _spec("chain-of-note", "Chain-of-Note", TechniqueFamily.AUGMENTATION, TechniqueStatus.EXPERIMENTAL, "cheragh.ChainOfNoteRetriever", "Generate evidence notes before final synthesis."),
     _spec(
         "crag",
@@ -134,9 +146,11 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         TechniqueFamily.ORCHESTRATION,
         TechniqueStatus.EXPERIMENTAL,
         "cheragh.CorrectiveRAGEngine",
-        "Grade retrieved evidence and apply a bounded corrective fallback.",
+        "Grade evidence into correct/ambiguous/incorrect actions, refine it and optionally retrieve externally.",
         references=("https://arxiv.org/abs/2401.15884",),
-        limitations=("Does not bundle web search or the paper's full decompose/recompose pipeline.",),
+        limitations=(
+            "External/web search and semantic graders are injectable; the bundled decompose/recompose refiner is lexical.",
+        ),
     ),
     _spec(
         "self-rag",
@@ -150,26 +164,55 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
     ),
     _spec(
         "flare",
-        "FLARE-Direct",
+        "FLARE active retrieval",
         TechniqueFamily.ORCHESTRATION,
         TechniqueStatus.EXPERIMENTAL,
         "cheragh.FLAREPipeline",
-        "Interleave sentence drafting, retrieval and regeneration.",
+        "Interleave look-ahead drafting, uncertainty-triggered retrieval and grounded regeneration.",
         references=("https://arxiv.org/abs/2305.06983",),
-        limitations=("Retrieval is draft-length based rather than token-confidence based.",),
+        limitations=(
+            "Token-confidence adapters are injectable; text-only LLM clients use the documented draft-length fallback.",
+        ),
     ),
-    _spec("adaptive-rag", "Adaptive retrieval", TechniqueFamily.ORCHESTRATION, TechniqueStatus.EXPERIMENTAL, "cheragh.AdaptiveRetriever", "Gate or rephrase retrieval based on query classification."),
+    _spec(
+        "adaptive-rag",
+        "Adaptive RAG",
+        TechniqueFamily.ORCHESTRATION,
+        TechniqueStatus.EXPERIMENTAL,
+        "cheragh.AdaptiveRAGEngine",
+        "Route query complexity across no retrieval, single-step RAG and iterative RAG engines.",
+        references=("https://arxiv.org/abs/2403.14403",),
+        limitations=(
+            "Classifier and iterative engine are injectable; the bundled heuristic is deterministic rather than learned.",
+        ),
+    ),
     _spec("parent-child", "Parent-child retrieval", TechniqueFamily.ORCHESTRATION, TechniqueStatus.BETA, "cheragh.ParentChildRetriever", "Search fine chunks and return larger parent context."),
-    _spec("multi-hop", "Multi-hop RAG", TechniqueFamily.ORCHESTRATION, TechniqueStatus.BETA, "cheragh.MultiHopRAGEngine", "Retrieve evidence over a bounded sequence of sub-questions."),
+    _spec(
+        "multi-hop",
+        "Multi-hop RAG",
+        TechniqueFamily.ORCHESTRATION,
+        TechniqueStatus.BETA,
+        "cheragh.MultiHopRAGEngine",
+        "Interleave bounded planning, retrieval and evidence observations before final synthesis.",
+        references=(
+            "https://arxiv.org/abs/2212.10509",
+            "https://arxiv.org/abs/2210.03629",
+        ),
+        limitations=(
+            "Planner quality is application-provided; bundled rule-based/JSON adapters do not reproduce trained reasoning policies.",
+        ),
+    ),
     _spec(
         "raptor",
         "RAPTOR",
         TechniqueFamily.ORCHESTRATION,
         TechniqueStatus.EXPERIMENTAL,
         "cheragh.RAPTOREngine",
-        "Build and retrieve over hierarchical summary nodes.",
+        "Build summary trees and retrieve through collapsed or budgeted top-down beam traversal.",
         references=("https://arxiv.org/abs/2401.18059",),
-        limitations=("Baseline hierarchy and flat node retrieval, not full soft-clustering traversal.",),
+        limitations=(
+            "Hard greedy clustering and injectable summaries; no UMAP/GMM soft clustering or trained summarizer is bundled.",
+        ),
     ),
     _spec(
         "graph-rag",
@@ -214,6 +257,21 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
     ),
     _spec("retrieval-evaluation", "Retrieval evaluation", TechniqueFamily.EVALUATION, TechniqueStatus.STABLE, "cheragh.evaluate_retrieval", "Hit rate, MRR, precision, recall, nDCG and context precision."),
     _spec("generation-evaluation", "Generation evaluation", TechniqueFamily.EVALUATION, TechniqueStatus.BETA, "cheragh.evaluate_generation", "Deterministic citation and lexical grounding diagnostics."),
+    _spec(
+        "claim-evaluation",
+        "Claim-level faithfulness evaluation",
+        TechniqueFamily.EVALUATION,
+        TechniqueStatus.EXPERIMENTAL,
+        "cheragh.ClaimEvaluator",
+        "Separate claim support, contradiction and citation-to-evidence alignment with injectable judges.",
+        references=(
+            "https://arxiv.org/abs/2309.15217",
+            "https://arxiv.org/abs/2408.08067",
+        ),
+        limitations=(
+            "The dependency-free lexical fallback cannot detect semantic paraphrases or contradictions; inject an NLI/LLM judge.",
+        ),
+    ),
     _spec("access-controlled-rag", "Access-controlled RAG", TechniqueFamily.GOVERNANCE, TechniqueStatus.BETA, "cheragh.AccessControlledRAGEngine", "Filter retrieved evidence using tenant, collection, role and classification policy."),
     _spec(
         "community-graphrag",

@@ -1,4 +1,19 @@
 """Evaluation helpers."""
+from .claims import (
+    CitationAlignment,
+    Claim,
+    ClaimDiagnostic,
+    ClaimEvaluationResult,
+    ClaimEvaluator,
+    ClaimSegmenter,
+    ClaimStatus,
+    EntailmentScore,
+    EvidenceAssessment,
+    EvidenceEntailmentScorer,
+    LexicalEntailmentScorer,
+    SentenceClaimSegmenter,
+    evaluate_claims,
+)
 from .retrieval import (
     RetrievalExample,
     RetrievalEvaluationResult,
@@ -19,6 +34,19 @@ from .generation import (
 from .pipeline import PipelineEvaluationResult, evaluate_pipeline
 
 __all__ = [
+    "CitationAlignment",
+    "Claim",
+    "ClaimDiagnostic",
+    "ClaimEvaluationResult",
+    "ClaimEvaluator",
+    "ClaimSegmenter",
+    "ClaimStatus",
+    "EntailmentScore",
+    "EvidenceAssessment",
+    "EvidenceEntailmentScorer",
+    "LexicalEntailmentScorer",
+    "SentenceClaimSegmenter",
+    "evaluate_claims",
     "RetrievalExample",
     "RetrievalEvaluationResult",
     "evaluate_retrieval",
