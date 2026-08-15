@@ -17,13 +17,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass, field, is_dataclass
 import hashlib
 import hmac
 import json
+import math
 import pickle
+import threading
 import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 SCHEMA_VERSION = 1
 _HMAC_PREFIX = b"ARAGC1-HMAC\n"
@@ -45,6 +48,7 @@ class CacheStats:
     expired: int = 0
     errors: int = 0
     clears: int = 0
+    evictions: int = 0
     backend: str = "unknown"
     entries: int | None = None
 
@@ -66,6 +70,7 @@ class CacheStats:
             "expired": self.expired,
             "errors": self.errors,
             "clears": self.clears,
+            "evictions": self.evictions,
             "entries": self.entries,
             "requests": self.requests,
             "hit_rate": self.hit_rate,
@@ -258,14 +263,37 @@ def _entry_payload(entry: CacheEntry) -> dict[str, Any]:
 def _entry_from_payload(payload: Any) -> CacheEntry:
     if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
         raise CacheSerializerError("Unsupported cache entry schema")
-    return CacheEntry(
-        key=str(payload["key"]),
-        namespace=str(payload["namespace"]),
-        value=payload.get("value"),
-        created_at=float(payload.get("created_at", time.time())),
-        expires_at=payload.get("expires_at"),
-        metadata=dict(payload.get("metadata") or {}),
+    key = payload.get("key")
+    namespace = payload.get("namespace")
+    metadata = payload.get("metadata") or {}
+    if not isinstance(key, str) or not isinstance(namespace, str):
+        raise CacheSerializerError("cache entry key and namespace must be strings")
+    if not isinstance(metadata, dict):
+        raise CacheSerializerError("cache entry metadata must be an object")
+    created_at = _cache_timestamp(payload.get("created_at", time.time()), "created_at")
+    expires_at_raw = payload.get("expires_at")
+    expires_at = (
+        None
+        if expires_at_raw is None
+        else _cache_timestamp(expires_at_raw, "expires_at")
     )
+    return CacheEntry(
+        key=key,
+        namespace=namespace,
+        value=payload.get("value"),
+        created_at=created_at,
+        expires_at=expires_at,
+        metadata=dict(metadata),
+    )
+
+
+def _cache_timestamp(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CacheSerializerError(f"cache entry {field_name} must be a finite number")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise CacheSerializerError(f"cache entry {field_name} must be a finite number")
+    return normalized
 
 
 def _sign(raw: bytes, secret_key: str | bytes | None) -> bytes:
@@ -297,27 +325,49 @@ class CacheBackend(ABC):
     """Abstract cache backend with TTL and namespace support."""
 
     def __init__(self, default_ttl: int | float | None = None, namespace: str = "default"):
-        self.default_ttl = default_ttl
-        self.namespace = namespace
+        self.default_ttl = _validate_ttl(default_ttl, name="default_ttl")
+        self.namespace = str(namespace)
         self._stats = CacheStats(backend=self.__class__.__name__)
+        # Backends are shared by the cached component wrappers. Protect both
+        # statistics and the per-key single-flight registry so normal threaded
+        # application servers do not race or stampede an expensive provider.
+        self._state_lock = threading.RLock()
+        self._key_locks: dict[tuple[str, str], tuple[threading.Lock, int]] = {}
+        self._singleflight_local = threading.local()
 
     def get(self, key: str, default: Any = None, namespace: str | None = None) -> Any:
-        ns = namespace or self.namespace
+        ns = self.namespace if namespace is None else str(namespace)
+        return self._get_value(key, default=default, namespace=ns, record_stats=True)
+
+    def _get_value(
+        self,
+        key: str,
+        *,
+        default: Any,
+        namespace: str,
+        record_stats: bool,
+    ) -> Any:
         try:
-            entry = self._get_entry(ns, key)
+            entry = self._get_entry(namespace, key)
             if entry is None:
-                self._stats.misses += 1
+                if record_stats:
+                    self._increment_stat("misses")
                 return default
             if entry.is_expired:
-                self._stats.expired += 1
-                self._stats.misses += 1
-                self.delete(key, namespace=ns)
+                if record_stats:
+                    self._increment_stat("expired")
+                    self._increment_stat("misses")
+                # Delete conditionally. A concurrent writer may already have
+                # replaced this expired value with a fresh one.
+                self._delete_expired_entry(namespace, key, entry)
                 return default
-            self._stats.hits += 1
+            if record_stats:
+                self._increment_stat("hits")
             return entry.value
         except Exception:
-            self._stats.errors += 1
-            self._stats.misses += 1
+            self._increment_stat("errors")
+            if record_stats:
+                self._increment_stat("misses")
             return default
 
     def set(
@@ -328,15 +378,18 @@ class CacheBackend(ABC):
         namespace: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        ns = namespace or self.namespace
-        effective_ttl = self.default_ttl if ttl is None else ttl
-        expires_at = time.time() + float(effective_ttl) if effective_ttl else None
+        ns = self.namespace if namespace is None else str(namespace)
+        effective_ttl = self.default_ttl if ttl is None else _validate_ttl(ttl, name="ttl")
+        # A TTL of zero retains the historical "no expiry" contract. Negative,
+        # boolean and non-finite values are rejected instead of creating entries
+        # that are immortal by accident (NaN) or immediately stale.
+        expires_at = time.time() + effective_ttl if effective_ttl else None
         entry = CacheEntry(key=key, namespace=ns, value=value, expires_at=expires_at, metadata=metadata or {})
         try:
             self._set_entry(entry)
-            self._stats.sets += 1
+            self._increment_stat("sets")
         except Exception:
-            self._stats.errors += 1
+            self._increment_stat("errors")
             raise
 
     def get_or_set(
@@ -347,45 +400,58 @@ class CacheBackend(ABC):
         namespace: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Any:
+        ns = self.namespace if namespace is None else str(namespace)
         sentinel = object()
-        value = self.get(key, default=sentinel, namespace=namespace)
+        value = self.get(key, default=sentinel, namespace=ns)
         if value is not sentinel:
             return value
-        value = factory()
-        self.set(key, value, ttl=ttl, namespace=namespace, metadata=metadata)
-        return value
+        # Double-check after acquiring a per-key lock. Only one worker in this
+        # process evaluates the factory for a given namespace/key at a time.
+        with self._singleflight(ns, key):
+            value = self._get_value(
+                key,
+                default=sentinel,
+                namespace=ns,
+                record_stats=False,
+            )
+            if value is not sentinel:
+                return value
+            value = factory()
+            self.set(key, value, ttl=ttl, namespace=ns, metadata=metadata)
+            return value
 
     def delete(self, key: str, namespace: str | None = None) -> None:
         try:
-            self._delete_entry(namespace or self.namespace, key)
-            self._stats.deletes += 1
+            self._delete_entry(self.namespace if namespace is None else str(namespace), key)
+            self._increment_stat("deletes")
         except Exception:
-            self._stats.errors += 1
+            self._increment_stat("errors")
             raise
 
     def invalidate_namespace(self, namespace: str | None = None) -> int:
         try:
-            removed = self._clear_namespace(namespace or self.namespace)
-            self._stats.clears += 1
+            removed = self._clear_namespace(self.namespace if namespace is None else str(namespace))
+            self._increment_stat("clears")
             return removed
         except Exception:
-            self._stats.errors += 1
+            self._increment_stat("errors")
             raise
 
     def clear(self) -> int:
         try:
             removed = self._clear_all()
-            self._stats.clears += 1
+            self._increment_stat("clears")
             return removed
         except Exception:
-            self._stats.errors += 1
+            self._increment_stat("errors")
             raise
 
     def cleanup_expired(self) -> int:
         return self._cleanup_expired()
 
     def stats(self) -> CacheStats:
-        stats = CacheStats(**self._stats.__dict__)
+        with self._state_lock:
+            stats = CacheStats(**self._stats.__dict__)
         stats.entries = self.entry_count()
         return stats
 
@@ -394,6 +460,46 @@ class CacheBackend(ABC):
 
     def close(self) -> None:
         pass
+
+    def __enter__(self) -> "CacheBackend":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+    def _increment_stat(self, name: str, amount: int = 1) -> None:
+        with self._state_lock:
+            setattr(self._stats, name, int(getattr(self._stats, name)) + amount)
+
+    @contextmanager
+    def _singleflight(self, namespace: str, key: str) -> Iterator[None]:
+        identity = (namespace, key)
+        active = getattr(self._singleflight_local, "active", None)
+        if active is None:
+            active = set()
+            self._singleflight_local.active = active
+        if identity in active:
+            raise RuntimeError(
+                f"recursive cache factory for namespace={namespace!r}, key={key!r}"
+            )
+        with self._state_lock:
+            lock, references = self._key_locks.get(identity, (threading.Lock(), 0))
+            self._key_locks[identity] = (lock, references + 1)
+        lock.acquire()
+        active.add(identity)
+        try:
+            yield
+        finally:
+            active.remove(identity)
+            lock.release()
+            with self._state_lock:
+                registered = self._key_locks.get(identity)
+                if registered is not None and registered[0] is lock:
+                    remaining = registered[1] - 1
+                    if remaining <= 0:
+                        self._key_locks.pop(identity, None)
+                    else:
+                        self._key_locks[identity] = (lock, remaining)
 
     @abstractmethod
     def _get_entry(self, namespace: str, key: str) -> CacheEntry | None:
@@ -417,3 +523,23 @@ class CacheBackend(ABC):
 
     def _cleanup_expired(self) -> int:
         return 0
+
+    def _delete_expired_entry(self, namespace: str, key: str, entry: CacheEntry) -> None:
+        """Remove an entry observed as expired.
+
+        Backends with conditional primitives override this method so a fresh
+        concurrent replacement is not deleted by an older reader.
+        """
+
+        self._delete_entry(namespace, key)
+
+
+def _validate_ttl(value: int | float | None, *, name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a finite number >= 0 or None")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0:
+        raise ValueError(f"{name} must be a finite number >= 0 or None")
+    return normalized

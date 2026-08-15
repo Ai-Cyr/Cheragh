@@ -1,10 +1,17 @@
 """High-level RAG engine API."""
 from __future__ import annotations
 
+from collections.abc import Iterable as IterableABC
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 import asyncio
+import hashlib
+import logging
+from itertools import islice
+import math
+from numbers import Real
+from string import Formatter
 from typing import Any, Generator, Iterable, Iterator
 
 from .base import (
@@ -36,6 +43,9 @@ from .cache import (
     CachedRetriever,
     build_cache_backend,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class RAGStream(Iterator[str]):
@@ -95,6 +105,31 @@ class RAGEngine:
         trace_include_prompt: bool = False,
         trace_pricing: dict[str, Any] | None = None,
     ):
+        if not callable(getattr(retriever, "retrieve", None)):
+            raise TypeError("retriever must expose retrieve(query, top_k)")
+        if llm_client is not None and not callable(getattr(llm_client, "generate", None)):
+            raise TypeError("llm_client must expose generate(prompt)")
+        _validate_answer_prompt(answer_prompt)
+        for name, value in (
+            ("strict_grounding", strict_grounding),
+            ("flag_unsourced_sentences", flag_unsourced_sentences),
+            ("trace_enabled", trace_enabled),
+            ("trace_include_prompt", trace_include_prompt),
+        ):
+            if not isinstance(value, bool):
+                raise TypeError(f"{name} must be a bool")
+        if require_citations is not None and not isinstance(require_citations, bool):
+            raise TypeError("require_citations must be a bool or None")
+        if min_score is not None:
+            if isinstance(min_score, bool) or not isinstance(min_score, Real):
+                raise TypeError("min_score must be a real number or None")
+            if not math.isfinite(float(min_score)):
+                raise ValueError("min_score must be finite")
+            min_score = float(min_score)
+        if query_transformer is not None and not isinstance(query_transformer, str) and not callable(
+            getattr(query_transformer, "transform", None)
+        ):
+            raise TypeError("query_transformer must expose transform(query), be a provider name, or be None")
         self.retriever = retriever
         self.llm_client = llm_client or ExtractiveLLMClient()
         self.answer_prompt = answer_prompt
@@ -324,6 +359,7 @@ class RAGEngine:
         )
 
     def ask(self, query: str, top_k: int | None = None, **generate_kwargs: Any) -> RAGResponse:
+        query = _validate_query(query)
         trace = RAGTrace(query=query) if self.trace_enabled else None
         effective_top_k = self._effective_top_k(top_k)
 
@@ -343,7 +379,11 @@ class RAGEngine:
         if self.compressor is not None and docs:
             step = trace.start_step("compression", compressor=self.compressor.__class__.__name__) if trace else None
             before_chars = sum(len(doc.content) for doc in docs)
-            docs = self.compressor.compress(query, docs)
+            docs = _validated_document_results(
+                self.compressor.compress(query, [_snapshot_document(document) for document in docs]),
+                limit=effective_top_k,
+                name="compressor result",
+            )
             after_chars = sum(len(doc.content) for doc in docs)
             if trace:
                 trace.compression = {"before_chars": before_chars, "after_chars": after_chars, "document_count": len(docs)}
@@ -374,7 +414,23 @@ class RAGEngine:
         if trace:
             trace.prompt = prompt
         step = trace.start_step("generation", prompt_chars=len(prompt)) if trace else None
-        answer = self.llm_client.generate(prompt, **generate_kwargs)
+        try:
+            answer = self.llm_client.generate(prompt, **generate_kwargs)
+            if not isinstance(answer, str):
+                raise TypeError("llm_client.generate() must return a str")
+        except Exception as exc:
+            if step:
+                step.finish(error=type(exc).__name__)
+            if trace:
+                trace.warnings.append("generation_error")
+                trace.record_generation(
+                    prompt=prompt,
+                    answer="",
+                    model=getattr(self.llm_client, "model", None),
+                    pricing=self.trace_pricing,
+                )
+                self._finalize_trace(trace, answer="", prompt=prompt)
+            raise
         if step:
             step.finish(answer_chars=len(answer))
         if trace:
@@ -414,7 +470,17 @@ class RAGEngine:
             return None
         trace.finish(answer_chars=len(answer), prompt_chars=len(prompt))
         if self.trace_export_path is not None:
-            append_trace_jsonl(self.trace_export_path, trace, include_prompt=self.trace_include_prompt)
+            try:
+                append_trace_jsonl(self.trace_export_path, trace, include_prompt=self.trace_include_prompt)
+            except Exception as exc:
+                # Observability must not turn a successfully generated answer
+                # into an outage. Keep the failure visible in the in-memory
+                # trace without logging paths, prompts, or provider messages.
+                trace.warnings.append("trace_export_error")
+                logger.error(
+                    "trace_export_failed",
+                    extra={"error_type": type(exc).__name__},
+                )
         return trace
 
     def _effective_top_k(self, top_k: int | None) -> int:
@@ -568,6 +634,7 @@ class RAGEngine:
         non-breaking access to citations, warnings, sources and tracing.
         """
 
+        query = _validate_query(query)
         effective_top_k = self._effective_top_k(top_k)
         return RAGStream(self._stream_with_response(query, top_k=effective_top_k, **generate_kwargs))
 
@@ -577,6 +644,7 @@ class RAGEngine:
         top_k: int | None = None,
         **generate_kwargs: Any,
     ) -> Generator[str, None, RAGResponse]:
+        query = _validate_query(query)
         trace = RAGTrace(query=query) if self.trace_enabled else None
         effective_top_k = self._effective_top_k(top_k)
 
@@ -595,7 +663,11 @@ class RAGEngine:
         if self.compressor is not None and docs:
             step = trace.start_step("compression", compressor=self.compressor.__class__.__name__) if trace else None
             before_chars = sum(len(doc.content) for doc in docs)
-            docs = self.compressor.compress(query, docs)
+            docs = _validated_document_results(
+                self.compressor.compress(query, [_snapshot_document(document) for document in docs]),
+                limit=effective_top_k,
+                name="compressor result",
+            )
             after_chars = sum(len(doc.content) for doc in docs)
             if trace:
                 trace.compression = {
@@ -634,6 +706,8 @@ class RAGEngine:
         chunks: list[str] = []
         try:
             for chunk in self.llm_client.stream(prompt, **generate_kwargs):
+                if not isinstance(chunk, str):
+                    raise TypeError("llm_client.stream() must yield only str chunks")
                 chunks.append(chunk)
                 yield chunk
         except GeneratorExit:
@@ -715,17 +789,28 @@ class RAGEngine:
             variants = [query]
         else:
             step = trace.start_step("query_transform", transformer=self.query_transformer.__class__.__name__) if trace else None
-            variants = self.query_transformer.transform(query)
+            raw_variants = self.query_transformer.transform(query)
+            variants, capped = _validated_query_variants(raw_variants)
+            if not variants:
+                variants = [query]
+                if trace:
+                    trace.warnings.append("query_transform_empty_fallback")
+            if capped and trace:
+                trace.warnings.append(f"query_variants_capped:{_MAX_QUERY_VARIANTS}")
             if step:
                 step.finish(query_count=len(variants))
         if trace:
-            trace.query_variants = variants
+            trace.query_variants = list(variants)
         return variants
 
     def _retrieve_variants(self, queries: list[str], effective_top_k: int, trace: RAGTrace | None) -> list[Document]:
         merged: dict[str, Document] = {}
         for variant in queries:
-            docs = self.retriever.retrieve(variant, top_k=effective_top_k)
+            docs = _validated_document_results(
+                self.retriever.retrieve(variant, top_k=effective_top_k),
+                limit=effective_top_k,
+                name=f"retriever result for query variant {variant!r}",
+            )
             if trace:
                 trace.add_retrieval(variant, docs)
             for doc in docs:
@@ -735,6 +820,88 @@ class RAGEngine:
                     merged[key] = doc
         ordered = sorted(merged.values(), key=lambda doc: (doc.score is not None, doc.score or 0.0), reverse=True)
         return ordered[:effective_top_k]
+
+
+_MAX_QUERY_VARIANTS = 32
+
+
+def _validate_query(value: object, *, name: str = "query") -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{name} must not be empty")
+    return normalized
+
+
+def _validate_answer_prompt(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("answer_prompt must be a str")
+    if not value.strip():
+        raise ValueError("answer_prompt must not be empty")
+    try:
+        pending = [value]
+        while pending:
+            template = pending.pop()
+            for _, field, format_spec, _ in Formatter().parse(template):
+                if field is not None and field not in {"context", "query"}:
+                    raise ValueError
+                if format_spec:
+                    pending.append(format_spec)
+        value.format(context="", query="")
+    except (IndexError, KeyError, ValueError) as exc:
+        raise ValueError("answer_prompt may only use the {context} and {query} fields") from exc
+    return value
+
+
+def _validated_query_variants(values: object) -> tuple[list[str], bool]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, IterableABC):
+        raise TypeError("query_transformer.transform() must return an iterable of strings")
+    candidates = list(islice(iter(values), _MAX_QUERY_VARIANTS + 1))
+    capped = len(candidates) > _MAX_QUERY_VARIANTS
+    output: list[str] = []
+    seen: set[str] = set()
+    for index, candidate in enumerate(candidates[:_MAX_QUERY_VARIANTS]):
+        normalized = _validate_query(candidate, name=f"query variant {index}")
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(normalized)
+    return output, capped
+
+
+def _validated_document_results(values: object, *, limit: int, name: str) -> list[Document]:
+    limit = _validate_top_k(limit, name="document result limit")
+    if isinstance(values, (str, bytes)) or not isinstance(values, IterableABC):
+        raise TypeError(f"{name} must be an iterable of Document objects")
+    output: list[Document] = []
+    for index, document in enumerate(islice(iter(values), limit)):
+        if not isinstance(document, Document):
+            raise TypeError(f"{name}[{index}] must be a Document")
+        if not isinstance(document.content, str):
+            raise TypeError(f"{name}[{index}].content must be a str")
+        if not document.content.strip():
+            raise ValueError(f"{name}[{index}].content must not be empty")
+        if not isinstance(document.metadata, dict):
+            raise TypeError(f"{name}[{index}].metadata must be a dict")
+        if document.doc_id is not None and not isinstance(document.doc_id, str):
+            raise TypeError(f"{name}[{index}].doc_id must be a str or None")
+        if document.score is not None:
+            if isinstance(document.score, bool) or not isinstance(document.score, Real):
+                raise TypeError(f"{name}[{index}].score must be a real number or None")
+            if not math.isfinite(float(document.score)):
+                raise ValueError(f"{name}[{index}].score must be finite")
+        snapshot = _snapshot_document(document)
+        if snapshot.doc_id is None or not snapshot.doc_id.strip():
+            snapshot.metadata["synthetic_doc_id"] = True
+            snapshot.metadata["original_doc_id"] = snapshot.doc_id
+            digest = hashlib.sha256(snapshot.content.encode("utf-8")).hexdigest()[:20]
+            snapshot.doc_id = f"rag-anonymous-{digest}"
+        if snapshot.score is not None:
+            snapshot.score = float(snapshot.score)
+        output.append(snapshot)
+    return output
 
 
 def _validate_context_packer(
@@ -995,6 +1162,8 @@ def _build_compressor(compressor: ContextCompressor | str | None) -> ContextComp
 
 def _embedding_from_config(config: dict[str, Any]) -> EmbeddingModel:
     provider = str(config.get("provider", "hashing")).lower().replace("_", "-")
+    timeout_seconds = float(config.get("timeout_seconds", 60.0))
+    max_retries = config.get("max_retries")
     if provider in {"hashing", "local-hash"}:
         return HashingEmbedding(dimension=int(config.get("dimension", 384)))
     if provider in {"sentence-transformers", "sentence-transformer"}:
@@ -1004,33 +1173,60 @@ def _embedding_from_config(config: dict[str, Any]) -> EmbeddingModel:
     if provider == "openai":
         from .embeddings import OpenAIEmbedding
 
-        return OpenAIEmbedding(model=str(config.get("model", "text-embedding-3-small")), api_key=config.get("api_key"))
+        client_kwargs: dict[str, Any] = {"timeout": timeout_seconds}
+        if max_retries is not None:
+            client_kwargs["max_retries"] = int(max_retries)
+        return OpenAIEmbedding(
+            model=str(config.get("model", "text-embedding-3-small")),
+            api_key=config.get("api_key"),
+            **client_kwargs,
+        )
     if provider in {"azure-openai", "azure"}:
         from .embeddings import AzureOpenAIEmbedding
 
+        azure_client_kwargs: dict[str, Any] = {"timeout": timeout_seconds}
+        if max_retries is not None:
+            azure_client_kwargs["max_retries"] = int(max_retries)
         return AzureOpenAIEmbedding(
             model=str(config["model"]),
             api_key=config.get("api_key"),
             azure_endpoint=config.get("azure_endpoint"),
             api_version=str(config.get("api_version", "2024-02-01")),
+            **azure_client_kwargs,
         )
     if provider == "cohere":
         from .embeddings import CohereEmbedding
 
-        return CohereEmbedding(model=str(config.get("model", "embed-multilingual-v3.0")), api_key=config.get("api_key"))
+        return CohereEmbedding(
+            model=str(config.get("model", "embed-multilingual-v3.0")),
+            api_key=config.get("api_key"),
+            timeout=timeout_seconds,
+        )
     if provider == "voyage":
         from .embeddings import VoyageEmbedding
 
-        return VoyageEmbedding(model=str(config.get("model", "voyage-multilingual-2")), api_key=config.get("api_key"))
+        voyage_client_kwargs: dict[str, Any] = {"timeout": timeout_seconds}
+        if max_retries is not None:
+            voyage_client_kwargs["max_retries"] = int(max_retries)
+        return VoyageEmbedding(
+            model=str(config.get("model", "voyage-multilingual-2")),
+            api_key=config.get("api_key"),
+            **voyage_client_kwargs,
+        )
     raise ValueError(f"Unsupported embedding provider: {provider}")
 
 
 def _llm_from_config(config: dict[str, Any]) -> LLMClient:
     provider = str(config.get("provider", "extractive")).lower().replace("_", "-")
+    timeout_seconds = float(config.get("timeout_seconds", 60.0))
+    max_retries = int(config.get("max_retries", 2))
     if provider in {"extractive", "none", "local"}:
         return ExtractiveLLMClient()
     if provider in {"openai", "openai-chat"}:
-        client_kwargs = {}
+        client_kwargs: dict[str, Any] = {
+            "timeout": timeout_seconds,
+            "max_retries": max_retries,
+        }
         if config.get("base_url"):
             client_kwargs["base_url"] = config["base_url"]
         return OpenAILLMClient(
@@ -1046,19 +1242,34 @@ def _llm_from_config(config: dict[str, Any]) -> LLMClient:
             api_key=config.get("api_key"),
             azure_endpoint=config.get("azure_endpoint"),
             api_version=str(config.get("api_version", "2024-02-01")),
+            timeout=timeout_seconds,
+            max_retries=max_retries,
         )
     if provider == "anthropic":
         from .llms import AnthropicClient
 
-        return AnthropicClient(model=str(config.get("model", "claude-3-5-sonnet-latest")), api_key=config.get("api_key"))
+        return AnthropicClient(
+            model=str(config.get("model", "claude-3-5-sonnet-latest")),
+            api_key=config.get("api_key"),
+            timeout=timeout_seconds,
+            max_retries=max_retries,
+        )
     if provider == "ollama":
         from .llms import OllamaClient
 
-        return OllamaClient(model=str(config.get("model", "llama3.1")), base_url=str(config.get("base_url", "http://localhost:11434")))
+        return OllamaClient(
+            model=str(config.get("model", "llama3.1")),
+            base_url=str(config.get("base_url", "http://localhost:11434")),
+            timeout_seconds=timeout_seconds,
+        )
     if provider == "litellm":
         from .llms import LiteLLMClient
 
-        return LiteLLMClient(model=str(config["model"]))
+        return LiteLLMClient(
+            model=str(config["model"]),
+            timeout=timeout_seconds,
+            num_retries=max_retries,
+        )
     raise ValueError(f"Unsupported generation provider: {provider}")
 
 

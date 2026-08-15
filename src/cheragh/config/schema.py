@@ -102,6 +102,8 @@ class EmbeddingConfig(StrictBaseModel):
     api_key: str | None = None
     azure_endpoint: str | None = None
     api_version: str | None = None
+    timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
+    max_retries: int | None = Field(default=None, ge=0, le=10)
 
     @field_validator("provider")
     @classmethod
@@ -112,6 +114,8 @@ class EmbeddingConfig(StrictBaseModel):
     def validate_provider_requirements(self) -> "EmbeddingConfig":
         if self.provider in {"azure-openai", "azure"} and not self.model:
             raise ValueError("embedding.model is required for the Azure OpenAI provider")
+        if self.provider == "cohere" and self.max_retries is not None:
+            raise ValueError("embedding.max_retries is not supported by the Cohere client")
         return self
 
 
@@ -273,6 +277,8 @@ class GenerationConfig(StrictBaseModel):
     azure_endpoint: str | None = None
     api_version: str | None = None
     base_url: str | None = None
+    timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
+    max_retries: int = Field(default=2, ge=0, le=10)
 
     @field_validator("provider")
     @classmethod
@@ -294,6 +300,7 @@ class CacheConfig(StrictBaseModel):
     cache_path: str | None = None
     ttl: float | None = Field(default=None, gt=0)
     default_ttl: float | None = Field(default=None, gt=0)
+    max_entries: int | None = Field(default=10_000, gt=0)
     namespace: str = "default"
     serializer: Literal["json", "pickle", "signed-pickle"] = "json"
     secret_key: str | None = None
@@ -343,11 +350,24 @@ class CacheConfig(StrictBaseModel):
         return self
 
 
+class PricingConfig(StrictBaseModel):
+    input_per_1k: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+    output_per_1k: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+    currency: str = Field(default="USD", min_length=1)
+
+
 class ObservabilityConfig(StrictBaseModel):
     enabled: bool = True
     trace_export_path: str | None = None
     trace_include_prompt: bool = False
-    pricing: dict[str, float | str] = Field(default_factory=dict)
+    pricing: PricingConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_explicit_null_pricing(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "pricing" in data and data["pricing"] is None:
+            raise ValueError("observability.pricing must be an object")
+        return data
 
 
 class IndexingConfig(StrictBaseModel):
@@ -429,6 +449,6 @@ def validate_config(data: dict[str, Any]) -> RAGConfig:
 
 
 def load_and_validate_config(path: str | Path) -> RAGConfig:
-    from .loader import load_raw_config
+    from .loader import _resolve_environment_references, load_raw_config
 
-    return validate_config(load_raw_config(path))
+    return validate_config(_resolve_environment_references(load_raw_config(path)))

@@ -77,7 +77,7 @@ class ArchitectureCatalogueTests(unittest.TestCase):
         self.assertEqual(counts[TechniqueStatus.BETA], 12)
         self.assertEqual(counts[TechniqueStatus.EXPERIMENTAL], 26)
         self.assertEqual(counts[TechniqueStatus.PLANNED], 0)
-        self.assertEqual(cheragh.__version__, "1.3.0")
+        self.assertEqual(cheragh.__version__, "1.4.0")
 
 
 if __name__ == "__main__":

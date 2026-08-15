@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -60,6 +61,16 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number > 0")
     return parsed
 
 
@@ -191,7 +202,17 @@ def main(argv: list[str] | None = None) -> int:
     technique_list.add_argument("--status", choices=["stable", "beta", "experimental", "planned"])
     technique_list.add_argument(
         "--family",
-        choices=["indexing", "retrieval", "query", "augmentation", "orchestration", "structured", "multimodal", "evaluation", "governance"],
+        choices=[
+            "indexing",
+            "retrieval",
+            "query",
+            "augmentation",
+            "orchestration",
+            "structured",
+            "multimodal",
+            "evaluation",
+            "governance",
+        ],
     )
     technique_list.add_argument("--available", action="store_true", help="Show only implemented techniques")
     technique_list.add_argument("--json", action="store_true")
@@ -204,14 +225,32 @@ def main(argv: list[str] | None = None) -> int:
     serve_source.add_argument("--config", default=None)
     serve_source.add_argument("--index", default=None)
     serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--port", type=_positive_int, default=8000)
     serve.add_argument(
         "--enable-indexing",
         action="store_true",
         help="Enable the disabled-by-default POST /index endpoint",
     )
     serve.add_argument("--index-root", default=None, help="Restrict POST /index paths to this root")
-    serve.add_argument("--api-key", default=None, help="Require this X-API-Key on API endpoints")
+    serve.add_argument(
+        "--api-key",
+        default=None,
+        help="Require this X-API-Key (prefer the CHERAGH_API_KEY environment variable)",
+    )
+    serve.add_argument(
+        "--require-auth",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Fail startup without an API key (automatic on non-loopback binds)",
+    )
+    serve.add_argument("--allow-prompt-exposure", action="store_true")
+    serve.add_argument("--max-top-k", type=_positive_int, default=50)
+    serve.add_argument("--max-request-body-bytes", type=_positive_int, default=1_048_576)
+    serve.add_argument("--max-concurrent-operations", type=_positive_int, default=16)
+    serve.add_argument("--max-server-connections", type=_positive_int, default=128)
+    serve.add_argument("--request-timeout-seconds", type=_positive_float, default=60.0)
+    serve.add_argument("--index-timeout-seconds", type=_positive_float, default=900.0)
+    serve.add_argument("--stream-max-duration-seconds", type=_positive_float, default=300.0)
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -307,7 +346,12 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         store = MemoryVectorStore.load(args.index or ".cheragh_index", embedder)
         llm = OpenAILLMClient(model=args.openai_model) if args.openai_model else ExtractiveLLMClient()
         effective_top_k = args.top_k if args.top_k is not None else 5
-        engine = RAGEngine(store.as_retriever(), llm_client=llm, top_k=effective_top_k, trace_export_path=args.trace_output)
+        engine = RAGEngine(
+            store.as_retriever(),
+            llm_client=llm,
+            top_k=effective_top_k,
+            trace_export_path=args.trace_output,
+        )
     response = engine.ask(args.question, top_k=args.top_k)
     if args.json:
         data = response.to_dict(include_prompt=args.include_prompt)
@@ -363,16 +407,68 @@ def _cmd_validate_config(args: argparse.Namespace) -> int:
     try:
         config = load_and_validate_config(args.config)
     except ValidationError as exc:
-        print(exc, file=sys.stderr, flush=True)
+        # ``str(ValidationError)`` contains ``input_value`` and can therefore
+        # disclose resolved API keys or cache secrets.  Keep the useful error
+        # location/message while explicitly excluding both inputs and URLs.
+        errors = exc.errors(include_input=False, include_url=False)
+        print(
+            json.dumps(errors, ensure_ascii=False, indent=2, default=str),
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
     except Exception as exc:
         print(f"Invalid config: {exc}", file=sys.stderr, flush=True)
         return 1
     if args.json:
-        print(json.dumps(config.to_legacy_dict(), ensure_ascii=False, indent=2), flush=True)
+        print(
+            json.dumps(
+                _redact_config_secrets(config.to_legacy_dict()),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
+        )
     else:
         print(f"Config OK: {args.config}", flush=True)
     return 0
+
+
+_SENSITIVE_CONFIG_KEYS = {
+    "access_key",
+    "api_key",
+    "authorization",
+    "client_secret",
+    "credential",
+    "hmac_key",
+    "password",
+    "private_key",
+    "redis_url",
+    "secret_key",
+    "token",
+}
+
+
+def _redact_config_secrets(value):
+    """Return a JSON-safe copy with credential-like fields removed."""
+
+    if isinstance(value, dict):
+        output = {}
+        for key, item in value.items():
+            normalized = str(key).casefold()
+            sensitive = (
+                normalized in _SENSITIVE_CONFIG_KEYS
+                or normalized.endswith("_api_key")
+                or normalized.endswith("_password")
+                or normalized.endswith("_private_key")
+                or normalized.endswith("_secret")
+                or normalized.endswith("_token")
+            )
+            output[key] = "***" if sensitive else _redact_config_secrets(item)
+        return output
+    if isinstance(value, list):
+        return [_redact_config_secrets(item) for item in value]
+    return value
 
 
 def _cmd_techniques(args: argparse.Namespace) -> int:
@@ -422,6 +518,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         enable_indexing=args.enable_indexing,
         allowed_index_root=args.index_root,
         api_key=args.api_key,
+        require_auth=args.require_auth,
+        allow_prompt_exposure=args.allow_prompt_exposure,
+        max_top_k=args.max_top_k,
+        max_request_body_bytes=args.max_request_body_bytes,
+        max_concurrent_operations=args.max_concurrent_operations,
+        max_server_connections=args.max_server_connections,
+        request_timeout_seconds=args.request_timeout_seconds,
+        index_timeout_seconds=args.index_timeout_seconds,
+        stream_max_duration_seconds=args.stream_max_duration_seconds,
     )
     return 0
 

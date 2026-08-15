@@ -58,24 +58,39 @@ def load_documents(
 
     patterns = _combined_exclude_patterns(exclude_patterns)
     root = p.parent if p.is_file() else p
+    resolved_root = root.resolve(strict=True)
     files = [p] if p.is_file() else list(_iter_candidate_files(p, recursive=recursive, exclude_patterns=patterns))
     documents: list[Document] = []
     for file_path in files:
         if _is_excluded(file_path, root, patterns):
             continue
-        if max_file_size_mb is not None and file_path.stat().st_size > max_file_size_mb * 1024 * 1024:
+        # Resolve every candidate against the canonical source root before any
+        # stat/read.  In particular, never follow a file symlink (including one
+        # below nested directories) outside the corpus selected by the caller.
+        resolved_file = _resolve_contained_candidate(file_path, resolved_root)
+        if max_file_size_mb is not None and resolved_file.stat().st_size > max_file_size_mb * 1024 * 1024:
             continue
-        if _looks_binary(file_path):
+        if _looks_binary(resolved_file):
             continue
-        suffix = file_path.suffix.lower()
-        if supports_text(file_path):
-            documents.append(load_text_file(file_path, encoding=encoding))
-        elif supports_html(file_path):
-            documents.append(load_html_file(file_path, encoding=encoding))
+        # Use the canonical path for the loader.  A later replacement of the
+        # lexical symlink cannot redirect this read.  Re-resolve immediately
+        # before and after the loader to fail closed if a canonical component
+        # was concurrently replaced.
+        read_path = _resolve_contained_candidate(resolved_file, resolved_root)
+        suffix = read_path.suffix.lower()
+        loaded: list[Document] = []
+        if supports_text(read_path):
+            loaded.append(load_text_file(read_path, encoding=encoding))
+        elif supports_html(read_path):
+            loaded.append(load_html_file(read_path, encoding=encoding))
         elif include_pdf and suffix == ".pdf":
-            documents.extend(load_pdf_file(file_path))
+            loaded.extend(load_pdf_file(read_path))
         elif include_docx and suffix == ".docx":
-            documents.append(load_docx_file(file_path))
+            loaded.append(load_docx_file(read_path))
+        confirmed_path = _resolve_contained_candidate(read_path, resolved_root)
+        if confirmed_path != read_path:
+            raise RuntimeError(f"Source changed during ingestion: {read_path}")
+        documents.extend(loaded)
     return [doc for doc in documents if doc.content.strip()]
 
 
@@ -126,6 +141,27 @@ def _looks_binary(path: Path, sample_size: int = 4096) -> bool:
     if not sample:
         return False
     return b"\x00" in sample
+
+
+def _resolve_contained_candidate(path: Path, resolved_root: Path) -> Path:
+    """Resolve ``path`` and require it to remain below ``resolved_root``.
+
+    ``resolved_root`` must be the already-canonical directory defining the
+    caller's corpus boundary.  ``strict=True`` ensures broken or concurrently
+    removed candidates fail instead of being normalized into an unchecked
+    path.
+    """
+
+    candidate = path.resolve(strict=True)
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Refusing to ingest path outside source root: {path}"
+        ) from exc
+    if not candidate.is_file():
+        raise RuntimeError(f"Source is no longer a regular file: {path}")
+    return candidate
 
 
 def _combined_exclude_patterns(exclude_patterns: Sequence[str] | None = None) -> tuple[str, ...]:

@@ -6,10 +6,21 @@ unless an integration is explicitly used.
 from __future__ import annotations
 
 import json
+import math
+from numbers import Real
 from typing import Any, Iterator, Optional
 from urllib import request
 
 from .base import LLMClient, OpenAILLMClient
+
+
+def _validate_timeout_seconds(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("timeout must be a real number")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError("timeout must be finite and > 0")
+    return normalized
 
 
 class OpenAIChatClient(OpenAILLMClient):
@@ -71,13 +82,23 @@ class AzureOpenAIChatClient(LLMClient):
 class AnthropicClient(LLMClient):
     """Anthropic Messages API client."""
 
-    def __init__(self, model: str = "claude-3-5-sonnet-latest", api_key: Optional[str] = None, client: Any | None = None):
+    def __init__(
+        self,
+        model: str = "claude-3-5-sonnet-latest",
+        api_key: Optional[str] = None,
+        client: Any | None = None,
+        **client_kwargs: Any,
+    ):
         if client is None:
             try:
                 from anthropic import Anthropic
             except ImportError as exc:  # pragma: no cover - optional dependency
                 raise ImportError("AnthropicClient requires: pip install cheragh[anthropic]") from exc
-            client = Anthropic(api_key=api_key) if api_key else Anthropic()
+            client = (
+                Anthropic(api_key=api_key, **client_kwargs)
+                if api_key
+                else Anthropic(**client_kwargs)
+            )
         self.client = client
         self.model = model
 
@@ -136,17 +157,25 @@ class LiteLLMClient(LLMClient):
 class OllamaClient(LLMClient):
     """Small stdlib-only client for a local Ollama server."""
 
-    def __init__(self, model: str = "llama3.1", base_url: str = "http://localhost:11434"):
+    def __init__(
+        self,
+        model: str = "llama3.1",
+        base_url: str = "http://localhost:11434",
+        timeout_seconds: float = 60.0,
+    ):
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.timeout_seconds = _validate_timeout_seconds(timeout_seconds)
 
     def generate(self, prompt: str, temperature: float = 0.0, **kwargs: Any) -> str:
+        request_kwargs = dict(kwargs)
+        timeout = _validate_timeout_seconds(request_kwargs.pop("timeout", self.timeout_seconds))
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": temperature},
-            **kwargs,
+            **request_kwargs,
         }
         req = request.Request(
             f"{self.base_url}/api/generate",
@@ -154,17 +183,19 @@ class OllamaClient(LLMClient):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with request.urlopen(req, timeout=kwargs.pop("timeout", 120)) as response:  # noqa: S310 - user-provided local URL
+        with request.urlopen(req, timeout=timeout) as response:  # noqa: S310 - user-provided local URL
             data = json.loads(response.read().decode("utf-8"))
         return str(data.get("response", ""))
 
     def stream(self, prompt: str, temperature: float = 0.0, **kwargs: Any) -> Iterator[str]:
+        request_kwargs = dict(kwargs)
+        timeout = _validate_timeout_seconds(request_kwargs.pop("timeout", self.timeout_seconds))
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": True,
             "options": {"temperature": temperature},
-            **kwargs,
+            **request_kwargs,
         }
         req = request.Request(
             f"{self.base_url}/api/generate",
@@ -172,7 +203,7 @@ class OllamaClient(LLMClient):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with request.urlopen(req, timeout=kwargs.pop("timeout", 120)) as response:  # noqa: S310 - user-provided local URL
+        with request.urlopen(req, timeout=timeout) as response:  # noqa: S310 - user-provided local URL
             for raw_line in response:
                 if not raw_line.strip():
                     continue
