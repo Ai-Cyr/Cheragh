@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from ..base import BaseRetriever, Document, ExtractiveLLMClient, LLMClient
-from ..engine import RAGEngine, RAGResponse, Source
+from ..engine import RAGResponse, Source
 from ..pipeline import AdvancedRAGPipeline, DEFAULT_ANSWER_PROMPT_FR
 from ..citations import validate_citations
 from ..tracing import RAGTrace

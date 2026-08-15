@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import os
+import tempfile
 from typing import TYPE_CHECKING, Iterable, Optional
 
 from ..base import BaseRetriever, Document, EmbeddingModel, _numpy, cosine_similarity
@@ -69,28 +71,49 @@ class MemoryVectorStore:
         """Persist documents and embeddings to ``path``.
 
         The embedding model itself is not serialized; pass the same compatible
-        embedder to :meth:`load`.
+        embedder to :meth:`load`. Every file is fully staged in the destination
+        directory before atomic replacement; ``manifest.json`` is committed
+        last so readers never observe a partially written individual file.
         """
         p = Path(path)
         p.mkdir(parents=True, exist_ok=True)
-        docs_path = p / "documents.jsonl"
-        with docs_path.open("w", encoding="utf-8") as f:
-            for doc in self.documents:
-                f.write(json.dumps(_document_to_dict(doc), ensure_ascii=False) + "\n")
         np = _numpy()
-        np.save(p / "embeddings.npy", self.embeddings if self.embeddings is not None else np.zeros((0, 0)))
-        (p / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "count": len(self.documents),
-                    "embedding_model": self.embedding_model.get_fingerprint(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        embeddings = self.embeddings if self.embeddings is not None else np.zeros((0, 0))
+        manifest = {
+            "schema_version": 1,
+            "count": len(self.documents),
+            "embedding_model": self.embedding_model.get_fingerprint(),
+        }
+        staged: list[tuple[Path, Path]] = []
+        try:
+            staged.append(
+                (
+                    _stage_documents(p, self.documents),
+                    p / "documents.jsonl",
+                )
+            )
+            staged.append((_stage_embeddings(p, embeddings), p / "embeddings.npy"))
+            staged.append(
+                (
+                    _stage_text(
+                        p,
+                        "manifest",
+                        json.dumps(manifest, ensure_ascii=False, indent=2),
+                    ),
+                    p / "manifest.json",
+                )
+            )
+            # ``staged`` is ordered documents, embeddings, manifest; commit the
+            # manifest last so readers can use it as the snapshot marker.
+            for temporary_path, destination in staged:
+                os.replace(temporary_path, destination)
+            _fsync_directory(p)
+        finally:
+            for temporary_path, _ in staged:
+                try:
+                    temporary_path.unlink()
+                except FileNotFoundError:
+                    pass
 
     @classmethod
     def load(cls, path: str | Path, embedding_model: EmbeddingModel) -> "MemoryVectorStore":
@@ -140,3 +163,59 @@ def _document_from_dict(data: dict) -> Document:
         doc_id=data.get("doc_id"),
         score=data.get("score"),
     )
+
+
+def _stage_documents(directory: Path, documents: Iterable[Document]) -> Path:
+    fd, temporary_name = tempfile.mkstemp(prefix=".documents.", suffix=".tmp", dir=directory)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            for document in documents:
+                file.write(json.dumps(_document_to_dict(document), ensure_ascii=False) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return temporary_path
+
+
+def _stage_text(directory: Path, prefix: str, content: str) -> Path:
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{prefix}.", suffix=".tmp", dir=directory)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return temporary_path
+
+
+def _stage_embeddings(directory: Path, embeddings: np.ndarray) -> Path:
+    np = _numpy()
+    fd, temporary_name = tempfile.mkstemp(prefix=".embeddings.", suffix=".tmp", dir=directory)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as file:
+            np.save(file, embeddings, allow_pickle=False)
+            file.flush()
+            os.fsync(file.fileno())
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return temporary_path
+
+
+def _fsync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(directory, flags)
+    except OSError:  # pragma: no cover - platform-specific durability support
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

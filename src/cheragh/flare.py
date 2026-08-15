@@ -22,7 +22,7 @@ Retriever) car il entrelace retrieval et génération.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from .base import BaseRetriever, Document, LLMClient
 

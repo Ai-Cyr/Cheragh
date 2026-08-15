@@ -16,7 +16,7 @@ Formule RRF : score(d) = Σ 1 / (k + rank_i(d))  — k=60 par défaut.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from .base import BaseRetriever, Document, LLMClient
 

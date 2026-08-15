@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("question")
     ask.add_argument("--config", default=None, help="Load a RAGEngine from YAML/JSON config")
     ask.add_argument("--index", default=".cheragh_index", help="Index directory")
-    ask.add_argument("--top-k", type=int, default=5)
+    ask.add_argument("--top-k", type=int, default=None, help="Override the engine/config top_k")
     ask.add_argument("--dimension", type=int, default=384)
     ask.add_argument("--openai-model", default=None, help="Use OpenAI for generation when provided")
     ask.add_argument("--json", action="store_true", help="Return JSON")
@@ -100,6 +100,20 @@ def main(argv: list[str] | None = None) -> int:
     validate = sub.add_parser("validate-config", help="Validate a YAML/JSON config with the v1.0 Pydantic schema")
     validate.add_argument("config", help="Path to rag.yaml or rag.json")
     validate.add_argument("--json", action="store_true", help="Print normalized config as JSON")
+
+    techniques = sub.add_parser("techniques", help="Inspect the machine-readable RAG technique catalogue")
+    technique_sub = techniques.add_subparsers(dest="techniques_command", required=True)
+    technique_list = technique_sub.add_parser("list", help="List techniques and maturity levels")
+    technique_list.add_argument("--status", choices=["stable", "beta", "experimental", "planned"])
+    technique_list.add_argument(
+        "--family",
+        choices=["indexing", "retrieval", "query", "augmentation", "orchestration", "structured", "multimodal", "evaluation", "governance"],
+    )
+    technique_list.add_argument("--available", action="store_true", help="Show only implemented techniques")
+    technique_list.add_argument("--json", action="store_true")
+    technique_show = technique_sub.add_parser("show", help="Show one technique")
+    technique_show.add_argument("technique_id")
+    technique_show.add_argument("--json", action="store_true")
 
     serve = sub.add_parser("serve", help="Serve a RAG API with FastAPI")
     serve.add_argument("--config", default=None)
@@ -129,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_doctor(args)
     if args.command == "validate-config":
         return _cmd_validate_config(args)
+    if args.command == "techniques":
+        return _cmd_techniques(args)
     if args.command == "serve":
         return _cmd_serve(args)
     return 2
@@ -171,7 +187,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         embedder = HashingEmbedding(dimension=args.dimension)
         store = MemoryVectorStore.load(args.index, embedder)
         llm = OpenAILLMClient(model=args.openai_model) if args.openai_model else ExtractiveLLMClient()
-        engine = RAGEngine(store.as_retriever(), llm_client=llm, top_k=args.top_k, trace_export_path=args.trace_output)
+        engine = RAGEngine(store.as_retriever(), llm_client=llm, top_k=args.top_k or 5, trace_export_path=args.trace_output)
     response = engine.ask(args.question, top_k=args.top_k)
     if args.json:
         data = response.to_dict(include_prompt=args.include_prompt)
@@ -236,6 +252,42 @@ def _cmd_validate_config(args: argparse.Namespace) -> int:
         print(json.dumps(config.to_legacy_dict(), ensure_ascii=False, indent=2), flush=True)
     else:
         print(f"Config OK: {args.config}", flush=True)
+    return 0
+
+
+def _cmd_techniques(args: argparse.Namespace) -> int:
+    from ..catalog import get_technique, list_techniques
+
+    if args.techniques_command == "show":
+        try:
+            spec = get_technique(args.technique_id)
+        except KeyError as exc:
+            print(str(exc), file=sys.stderr, flush=True)
+            return 1
+        payload = spec.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
+        else:
+            print(f"{spec.id}: {spec.name}", flush=True)
+            print(f"status={spec.status.value} family={spec.family.value} available={spec.available}", flush=True)
+            print(spec.summary, flush=True)
+            if spec.implementation:
+                print(f"implementation={spec.implementation}", flush=True)
+            for limitation in spec.limitations:
+                print(f"limitation: {limitation}", flush=True)
+        return 0
+
+    specs = list_techniques(
+        status=args.status,
+        family=args.family,
+        available=True if args.available else None,
+    )
+    if args.json:
+        print(json.dumps([spec.to_dict() for spec in specs], ensure_ascii=False, indent=2), flush=True)
+    else:
+        for spec in specs:
+            marker = "yes" if spec.available else "no"
+            print(f"{spec.id:24} {spec.status.value:12} {spec.family.value:14} available={marker}", flush=True)
     return 0
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
-from ..base import BaseRetriever, Document, LLMClient
+from ..base import BaseRetriever, Document
 
 
 _CLASSIFICATION_ORDER = {
@@ -63,6 +63,7 @@ class AccessPolicy:
     default_classification: str = "internal"
     metadata_equals: dict[str, Any] = field(default_factory=dict)
     metadata_in: dict[str, set[Any]] = field(default_factory=dict)
+    strict: bool = False
 
     def authorize(self, document: Document, principal: Principal | Mapping[str, Any] | None = None) -> AccessDecision:
         principal_obj = _coerce_principal(principal)
@@ -82,20 +83,35 @@ class AccessPolicy:
         if allowed_roles and not (principal_obj.roles & allowed_roles):
             return AccessDecision(False, "role_not_allowed")
 
+        require_tenant = self.require_tenant_match or self.strict
         tenant_id = meta.get("tenant_id")
-        if self.require_tenant_match and tenant_id is not None:
-            if tenant_id not in principal_obj.tenant_ids and "admin" not in principal_obj.roles:
+        if require_tenant:
+            if tenant_id is None:
+                return AccessDecision(False, "tenant_metadata_missing")
+            elif tenant_id not in principal_obj.tenant_ids and "admin" not in principal_obj.roles:
                 return AccessDecision(False, "tenant_mismatch", {"tenant_id": tenant_id})
 
+        require_collection = self.require_collection_match or self.strict
         collection_id = meta.get("collection_id")
-        if self.require_collection_match and collection_id is not None:
-            if collection_id not in principal_obj.collection_ids and "admin" not in principal_obj.roles:
+        if require_collection:
+            if collection_id is None:
+                return AccessDecision(False, "collection_metadata_missing")
+            elif collection_id not in principal_obj.collection_ids and "admin" not in principal_obj.roles:
                 return AccessDecision(False, "collection_mismatch", {"collection_id": collection_id})
 
         classification = str(meta.get("classification", self.default_classification)).lower()
+        if classification not in _CLASSIFICATION_ORDER:
+            return AccessDecision(False, "unknown_classification", {"classification": classification})
+        principal_classification = principal_obj.max_classification.lower()
         if self.allow_public and classification == "public":
             pass
-        elif _CLASSIFICATION_ORDER.get(classification, 1) > _CLASSIFICATION_ORDER.get(principal_obj.max_classification.lower(), 1):
+        elif principal_classification not in _CLASSIFICATION_ORDER:
+            return AccessDecision(
+                False,
+                "unknown_principal_classification",
+                {"classification": principal_classification},
+            )
+        elif _CLASSIFICATION_ORDER.get(classification, 1) > _CLASSIFICATION_ORDER.get(principal_classification, 1):
             return AccessDecision(False, "classification_too_high", {"classification": classification})
 
         for key, expected in self.metadata_equals.items():

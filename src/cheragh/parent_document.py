@@ -3,8 +3,8 @@ Technique 5 : Parent Document Retrieval — version persistable.
 """
 from __future__ import annotations
 
+import hashlib
 import re
-import uuid
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -23,6 +23,7 @@ class ParentDocumentRetriever(BaseRetriever):
         child_chunk_size: int = 200,
         child_chunk_overlap: int = 40,
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ):
         if child_chunk_overlap >= child_chunk_size:
             raise ValueError("child_chunk_overlap doit être < child_chunk_size.")
@@ -31,13 +32,16 @@ class ParentDocumentRetriever(BaseRetriever):
         self.child_chunk_size = child_chunk_size
         self.child_chunk_overlap = child_chunk_overlap
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
 
         # S'assurer que chaque parent a un id STABLE (sinon le hash change à chaque run)
         self.parent_documents: Dict[str, Document] = {}
         for p in parent_documents:
             if p.doc_id is None:
-                # Id déterministe basé sur le contenu pour la stabilité du cache
-                p.doc_id = f"parent::{abs(hash(p.content)) % (10 ** 16)}"
+                # Python's hash() is salted per process; SHA-256 keeps cache and
+                # child identifiers stable across restarts and machines.
+                digest = hashlib.sha256(p.content.encode("utf-8")).hexdigest()
+                p.doc_id = f"parent::{digest}"
             self.parent_documents[p.doc_id] = p
 
         self.child_documents: List[Document] = []
@@ -105,6 +109,7 @@ class ParentDocumentRetriever(BaseRetriever):
             expected_content_hash=hash_documents(self._parent_list()),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False

@@ -55,6 +55,25 @@ class RetrieverConfig(StrictBaseModel):
     def normalize_type(cls, value: str) -> str:
         return value.lower().replace("_", "-")
 
+    @field_validator("tokenizer")
+    @classmethod
+    def validate_tokenizer_options(cls, value: dict[str, Any]) -> dict[str, Any]:
+        aliases = {"normalize_accents": "strip_accents"}
+        allowed = {
+            "lowercase",
+            "strip_accents",
+            "keep_hyphenated",
+            "stopwords",
+            "ngram_range",
+            "min_token_length",
+            "use_default_stopwords",
+        }
+        normalized = {aliases.get(key, key): item for key, item in value.items()}
+        unknown = set(normalized) - allowed
+        if unknown:
+            raise ValueError(f"Unsupported retriever.tokenizer options: {', '.join(sorted(unknown))}")
+        return normalized
+
 
 class VectorStoreConfig(StrictBaseModel):
     type: str | None = None
@@ -204,9 +223,6 @@ class RAGConfig(StrictBaseModel):
     def validate_retriever_vectorstore(self) -> "RAGConfig":
         retriever_type = self.retriever.type
         vector_type = self.vectorstore.type
-        if vector_type and retriever_type in {"hybrid", "memory", "vector"}:
-            # Backward-compatible convention: vectorstore.type overrides retriever.type in RAGEngine.from_config.
-            return self
         supported = {"hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}
         effective_type = vector_type or retriever_type
         if effective_type not in supported:

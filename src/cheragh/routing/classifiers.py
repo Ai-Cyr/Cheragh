@@ -4,7 +4,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import re
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
+
+if TYPE_CHECKING:
+    from .rules import RouteRule
 
 
 @dataclass(frozen=True)
@@ -47,7 +50,7 @@ class RuleBasedQueryClassifier(QueryClassifier):
     :class:`QueryClassifier`.
     """
 
-    def __init__(self, rules: Sequence["RouteRule"] | None = None):
+    def __init__(self, rules: Sequence[RouteRule] | None = None):
         from .rules import default_rules
 
         self.rules = list(rules) if rules is not None else default_rules()

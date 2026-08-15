@@ -158,7 +158,7 @@ class SQLRAGEngine:
         self.trace_enabled = trace_enabled
         self.max_sql_steps = max(1_000, int(max_sql_steps))
         if self.read_only:
-            self._enable_sqlite_query_only()
+            self._install_readonly_guards()
 
     @classmethod
     def from_records(
@@ -286,7 +286,19 @@ class SQLRAGEngine:
         """Permanently switch this engine to SQLite read-only/query-only mode."""
 
         self.read_only = True
+        self._install_readonly_guards()
+
+    def _install_readonly_guards(self) -> None:
+        """Install guards that remain valid on every supported Python version.
+
+        Python 3.10 cannot disable an SQLite authorizer by passing ``None`` to
+        ``set_authorizer``. Keeping the read-only authorizer installed for the
+        lifetime of the engine avoids that version-specific failure mode and
+        also protects callers that use the exposed connection directly.
+        """
+
         self._enable_sqlite_query_only()
+        self.connection.set_authorizer(_sqlite_readonly_authorizer)
 
     def _enable_sqlite_query_only(self) -> None:
         try:
@@ -299,8 +311,6 @@ class SQLRAGEngine:
     def _execute_readonly(self, sql: str):
         if not self.read_only:
             return self.connection.execute(sql)
-        self._enable_sqlite_query_only()
-        self.connection.set_authorizer(_sqlite_readonly_authorizer)
         steps = {"count": 0}
 
         def progress_handler() -> int:
@@ -312,7 +322,6 @@ class SQLRAGEngine:
             return self.connection.execute(sql)
         finally:
             self.connection.set_progress_handler(None, 0)
-            self.connection.set_authorizer(None)
 
     def ask(self, question: str, use_llm_sql: bool = False, synthesize: bool = True, **kwargs: Any) -> RAGResponse:
         trace = RAGTrace() if self.trace_enabled else None
@@ -461,6 +470,11 @@ class StructuredRAG:
 
 
 def _sqlite_readonly_authorizer(action, arg1, arg2, dbname, source):
+    # ``schema()`` needs this introspection pragma. All user-provided SQL still
+    # passes through ``validate_sql()``, which rejects every PRAGMA statement.
+    if action == sqlite3.SQLITE_PRAGMA:
+        return sqlite3.SQLITE_OK if str(arg1 or "").lower() == "table_info" else sqlite3.SQLITE_DENY
+
     denied = {
         sqlite3.SQLITE_INSERT,
         sqlite3.SQLITE_UPDATE,
@@ -476,7 +490,6 @@ def _sqlite_readonly_authorizer(action, arg1, arg2, dbname, source):
         sqlite3.SQLITE_ALTER_TABLE,
         sqlite3.SQLITE_ATTACH,
         sqlite3.SQLITE_DETACH,
-        sqlite3.SQLITE_PRAGMA,
         sqlite3.SQLITE_TRANSACTION,
     }
     if action in denied:
@@ -582,5 +595,6 @@ def _simple_where_clause(question: str, table: TableSchema) -> str:
         match = re.search(rf"{re.escape(col_lower)}\s*(?:=|est|equals|vaut)\s*['\"]?([\wÀ-ÿ .-]+)['\"]?", q)
         if match:
             value = match.group(1).strip().strip(".,;:!?'")
-            clauses.append(f'"{col}" = \'{value.replace("'", "''")}\'')
+            escaped_value = value.replace("'", "''")
+            clauses.append(f'"{col}" = \'{escaped_value}\'')
     return " WHERE " + " AND ".join(clauses) if clauses else ""

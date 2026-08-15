@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from fnmatch import fnmatch
 from pathlib import Path
 import hashlib
 import json
@@ -13,7 +12,7 @@ from typing import Any, Iterator, Sequence
 
 from .base import Document, EmbeddingModel, HashingEmbedding
 from .ingestion import chunk_documents, load_documents
-from .ingestion.pipeline import DEFAULT_EXCLUDE_PATTERNS, _is_excluded, _looks_binary
+from .ingestion.pipeline import _combined_exclude_patterns, _is_excluded, _looks_binary
 from .vectorstores.memory import MemoryVectorStore
 
 
@@ -143,6 +142,17 @@ def index_path(
     embedder = embedding_model or HashingEmbedding()
     source_root = Path(path)
     output_path = Path(output)
+    scan_excludes = list(options.exclude_patterns or ())
+    if source_root.exists() and source_root.is_dir():
+        try:
+            output_relative = output_path.resolve().relative_to(source_root.resolve())
+        except ValueError:
+            output_relative = None
+        if output_relative is not None:
+            if not output_relative.parts:
+                raise ValueError("The index output directory cannot be the source directory")
+            relative = output_relative.as_posix()
+            scan_excludes.extend((relative, f"{relative}/**"))
     output_path.mkdir(parents=True, exist_ok=True)
 
     with _index_lock(output_path, enabled=options.use_lock and not options.dry_run, timeout=options.lock_timeout_seconds):
@@ -152,10 +162,19 @@ def index_path(
             recursive=options.recursive,
             include_pdf=options.include_pdf,
             include_docx=options.include_docx,
-            exclude_patterns=options.exclude_patterns,
+            exclude_patterns=scan_excludes,
             max_file_size_mb=options.max_file_size_mb,
         )
-        plan = plan_incremental_update(previous, current_entries, force=options.force or not options.incremental)
+        embedding_changed = bool(
+            previous.files
+            and previous.metadata.get("embedding_model")
+            and previous.metadata.get("embedding_model") != embedder.get_fingerprint()
+        )
+        plan = plan_incremental_update(
+            previous,
+            current_entries,
+            force=options.force or not options.incremental or embedding_changed,
+        )
         plan.skipped_files.extend(skipped)
 
         if options.dry_run:
@@ -164,17 +183,22 @@ def index_path(
                 "indexed_documents": None,
                 "output": str(output_path),
                 "plan": plan.to_dict(),
+                "embedding_changed": embedding_changed,
             }
 
         kept_docs: list[Document] = []
-        if options.incremental and (output_path / "documents.jsonl").exists() and (output_path / "embeddings.npy").exists():
+        kept_embeddings = None
+        if options.incremental and not embedding_changed and (output_path / "documents.jsonl").exists() and (output_path / "embeddings.npy").exists():
             existing = MemoryVectorStore.load(output_path, embedder)
             dirty_sources = set(plan.changed_files) | set(plan.deleted_files)
-            kept_docs = [
-                doc
-                for doc in existing.documents
+            kept_indices = [
+                index
+                for index, doc in enumerate(existing.documents)
                 if _resolved_source(doc) not in dirty_sources
             ]
+            kept_docs = [existing.documents[index] for index in kept_indices]
+            if existing.embeddings is not None and kept_indices:
+                kept_embeddings = existing.embeddings[kept_indices]
 
         new_docs: list[Document] = []
         for source in plan.changed_files:
@@ -184,15 +208,17 @@ def index_path(
                 recursive=False,
                 include_pdf=options.include_pdf,
                 include_docx=options.include_docx,
-                exclude_patterns=options.exclude_patterns,
+                exclude_patterns=scan_excludes,
                 max_file_size_mb=options.max_file_size_mb,
             )
             chunks = chunk_documents(loaded, chunk_size=options.chunk_size, chunk_overlap=options.chunk_overlap)
             new_docs.extend(chunks)
 
-        all_docs = kept_docs + new_docs
         store = MemoryVectorStore(embedder)
-        store.add_documents(all_docs)
+        store.documents = kept_docs
+        store.embeddings = kept_embeddings
+        store.add_documents(new_docs)
+        all_docs = store.documents
         store.save(output_path)
 
         doc_ids_by_source: dict[str, list[str]] = {path: [] for path in current_entries}
@@ -230,6 +256,7 @@ def index_path(
             "skipped_files": len(plan.skipped_files),
             "output": str(output_path),
             "plan": plan.to_dict(),
+            "embedding_changed": embedding_changed,
         }
 
 
@@ -248,7 +275,7 @@ def scan_indexable_files(
         raise FileNotFoundError(str(source))
     candidates = _candidate_files(source, recursive=recursive, include_pdf=include_pdf, include_docx=include_docx)
     root = source.parent if source.is_file() else source
-    patterns = tuple(exclude_patterns or DEFAULT_EXCLUDE_PATTERNS)
+    patterns = _combined_exclude_patterns(exclude_patterns)
     max_bytes = None if max_file_size_mb is None else int(max_file_size_mb * 1024 * 1024)
     entries: dict[str, IndexedFile] = {}
     skipped: list[str] = []

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Mapping, Pattern
+from typing import Mapping
 
 
 @dataclass(frozen=True)

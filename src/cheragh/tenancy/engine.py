@@ -92,7 +92,11 @@ class MultiTenantRAGEngine:
         enforce_access_control: bool = True,
     ):
         self.registry = registry or TenantRegistry()
-        self.access_policy = access_policy or AccessPolicy(require_tenant_match=True)
+        self.access_policy = access_policy or AccessPolicy(
+            require_tenant_match=True,
+            require_collection_match=True,
+            strict=True,
+        )
         self.enforce_access_control = enforce_access_control
 
     def add_tenant(self, tenant_id: str, name: str | None = None, **metadata: Any) -> TenantConfig:
@@ -117,8 +121,13 @@ class MultiTenantRAGEngine:
         **kwargs: Any,
     ) -> Any:
         binding = self.registry.get_collection(tenant_id, collection_id)
-        principal_obj = _tenant_principal(principal, tenant_id, binding.collection_id)
-        result = self._execute_target(binding.target, query, principal_obj, **kwargs)
+        principal_obj = _tenant_principal(
+            principal,
+            tenant_id,
+            binding.collection_id,
+            enforce_access_control=self.enforce_access_control,
+        )
+        result = self._execute_target(binding, query, principal_obj, **kwargs)
         _attach_tenant_metadata(result, tenant_id, binding.collection_id)
         return result
 
@@ -131,14 +140,23 @@ class MultiTenantRAGEngine:
         top_k: int = 5,
     ) -> list[Document]:
         binding = self.registry.get_collection(tenant_id, collection_id)
-        principal_obj = _tenant_principal(principal, tenant_id, binding.collection_id)
+        principal_obj = _tenant_principal(
+            principal,
+            tenant_id,
+            binding.collection_id,
+            enforce_access_control=self.enforce_access_control,
+        )
         target = binding.target
         if hasattr(target, "retriever"):
             target = target.retriever
         if not hasattr(target, "retrieve"):
             response = self.ask(query, tenant_id, collection_id, principal_obj, top_k=top_k)
             return list(getattr(response, "retrieved_documents", []) or [])[:top_k]
-        docs = list(target.retrieve(query, top_k=top_k * 4))
+        docs = _scope_documents(
+            target.retrieve(query, top_k=top_k * 4),
+            binding.tenant_id,
+            binding.collection_id,
+        )
         if self.enforce_access_control:
             docs = self.access_policy.filter_documents(docs, principal_obj)
         return docs[:top_k]
@@ -157,16 +175,32 @@ class MultiTenantRAGEngine:
             },
         }
 
-    def _execute_target(self, target: Any, query: str, principal: Principal, **kwargs: Any) -> Any:
+    def _execute_target(
+        self,
+        binding: CollectionBinding,
+        query: str,
+        principal: Principal,
+        **kwargs: Any,
+    ) -> Any:
+        target = binding.target
         if hasattr(target, "retriever") and hasattr(target, "llm_client") and self.enforce_access_control:
-            return AccessControlledRAGEngine(target, policy=self.access_policy, default_principal=principal).ask(query, **kwargs)
+            scoped_target = _ScopedRAGTarget(target, binding.tenant_id, binding.collection_id)
+            return AccessControlledRAGEngine(
+                scoped_target,
+                policy=self.access_policy,
+                default_principal=principal,
+            ).ask(query, **kwargs)
         if hasattr(target, "ask") and callable(target.ask):
             try:
                 return target.ask(query, principal=principal, **kwargs)
             except TypeError:
                 return target.ask(query, **kwargs)
         if hasattr(target, "retrieve") and callable(target.retrieve):
-            docs = target.retrieve(query, top_k=int(kwargs.get("top_k", 5)))
+            docs = _scope_documents(
+                target.retrieve(query, top_k=int(kwargs.get("top_k", 5))),
+                binding.tenant_id,
+                binding.collection_id,
+            )
             if self.enforce_access_control:
                 docs = self.access_policy.filter_documents(docs, principal)
             return docs
@@ -175,16 +209,89 @@ class MultiTenantRAGEngine:
         raise TypeError(f"Unsupported tenant target type: {type(target).__name__}")
 
 
-def _tenant_principal(principal: Principal | Mapping[str, Any] | None, tenant_id: str, collection_id: str) -> Principal:
+def _tenant_principal(
+    principal: Principal | Mapping[str, Any] | None,
+    tenant_id: str,
+    collection_id: str,
+    *,
+    enforce_access_control: bool = True,
+) -> Principal:
     if isinstance(principal, Principal):
-        p = principal
+        source = principal
     elif isinstance(principal, Mapping):
-        p = Principal.from_dict(principal)
+        source = Principal.from_dict(principal)
     else:
-        p = Principal(user_id="anonymous")
-    p.tenant_ids.add(tenant_id)
-    p.collection_ids.add(collection_id)
-    return p
+        source = Principal(user_id="anonymous")
+
+    is_admin = "admin" in source.roles
+    if enforce_access_control and not is_admin:
+        user_id = str(source.user_id or "").strip()
+        if not user_id or user_id.lower() == "anonymous":
+            raise PermissionError("An authenticated principal is required for tenant access")
+        if tenant_id not in source.tenant_ids:
+            raise PermissionError(f"Principal is not authorized for tenant {tenant_id!r}")
+        if source.collection_ids and collection_id not in source.collection_ids:
+            raise PermissionError(f"Principal is not authorized for collection {collection_id!r}")
+
+    # The scoped principal is a defensive copy. Empty collection_ids means the
+    # caller is authorized for every collection in an allowed tenant; the
+    # selected collection is added only to this request-local copy.
+    return Principal(
+        user_id=source.user_id,
+        roles=set(source.roles),
+        tenant_ids={*source.tenant_ids, tenant_id},
+        collection_ids={*source.collection_ids, collection_id},
+        attributes=dict(source.attributes),
+        max_classification=source.max_classification,
+    )
+
+
+class _ScopedRetriever(BaseRetriever):
+    """Attach authoritative registry scope without mutating source documents."""
+
+    def __init__(self, retriever: BaseRetriever, tenant_id: str, collection_id: str):
+        self.retriever = retriever
+        self.tenant_id = tenant_id
+        self.collection_id = collection_id
+
+    def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        return _scope_documents(
+            self.retriever.retrieve(query, top_k=top_k),
+            self.tenant_id,
+            self.collection_id,
+        )
+
+
+class _ScopedRAGTarget:
+    """Proxy a RAG target while scoping documents to its registry binding."""
+
+    def __init__(self, target: Any, tenant_id: str, collection_id: str):
+        self._target = target
+        self.retriever = _ScopedRetriever(target.retriever, tenant_id, collection_id)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+
+def _scope_documents(
+    documents: Any,
+    tenant_id: str,
+    collection_id: str,
+) -> list[Document]:
+    scoped: list[Document] = []
+    for doc in documents:
+        metadata = dict(doc.metadata or {})
+        metadata.setdefault("tenant_id", tenant_id)
+        metadata.setdefault("collection_id", collection_id)
+        scoped.append(
+            Document(
+                content=doc.content,
+                metadata=metadata,
+                doc_id=doc.doc_id,
+                score=doc.score,
+            )
+        )
+    return scoped
 
 
 def _attach_tenant_metadata(result: Any, tenant_id: str, collection_id: str) -> None:

@@ -36,6 +36,7 @@ class HybridSearchRetriever(BaseRetriever):
         cache_path: Optional[str] = None,
         filters: Optional[dict] = None,
         tokenizer: RetrievalTokenizer | None = None,
+        allow_unsafe_pickle: bool = False,
     ):
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("alpha must be in [0, 1].")
@@ -45,6 +46,7 @@ class HybridSearchRetriever(BaseRetriever):
         self.filters = filters
         self.tokenizer = tokenizer or RetrievalTokenizer()
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
         self.bm25 = None
         self._tokenized_corpus = None
         self.doc_embeddings: Optional[np.ndarray] = None
@@ -101,6 +103,7 @@ class HybridSearchRetriever(BaseRetriever):
             expected_content_hash=hash_documents(self.documents),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False

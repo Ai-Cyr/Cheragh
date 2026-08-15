@@ -42,6 +42,7 @@ class HyQERetriever(BaseRetriever):
         n_questions_per_doc: int = 5,
         include_original_content: bool = True,
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ):
         self.documents = documents
         self.embedding_model = embedding_model
@@ -49,6 +50,7 @@ class HyQERetriever(BaseRetriever):
         self.n_questions_per_doc = n_questions_per_doc
         self.include_original_content = include_original_content
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
 
         self._index_texts: List[str] = []
         self._index_to_doc: List[int] = []
@@ -107,6 +109,7 @@ class HyQERetriever(BaseRetriever):
             expected_content_hash=hash_documents(self.documents),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False

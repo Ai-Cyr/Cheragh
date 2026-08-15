@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import functools
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Sequence
 
 from ..base import BaseRetriever, Document, EmbeddingModel, LLMClient
 from ..reranking import BaseReranker

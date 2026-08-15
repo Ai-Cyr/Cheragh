@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
+from uuid import uuid4
 
 import numpy as np
 
@@ -43,7 +44,8 @@ class QdrantVectorStore:
         self._models = models
 
     def add_documents(self, documents: Iterable[Document]) -> None:
-        QdrantClient, models = require_qdrant_client()
+        _, models = require_qdrant_client()
+        self._models = models
         docs = list(documents)
         if not docs:
             return
@@ -52,19 +54,29 @@ class QdrantVectorStore:
             raise ValueError("Embeddings must be a 2D array")
         self._ensure_collection(vectors.shape[1], models)
         points = []
-        for idx, (doc, vector) in enumerate(zip(docs, vectors)):
-            point_id = _stable_qdrant_id(doc.doc_id or f"doc-{idx}")
+        for doc, vector in zip(docs, vectors):
+            if not doc.doc_id:
+                # A fresh UUID prevents anonymous documents from successive
+                # ``add_documents`` calls from reusing the old ``doc-0`` ID.
+                effective_doc_id = str(uuid4())
+                point_id = effective_doc_id
+            else:
+                effective_doc_id = str(doc.doc_id)
+                point_id = _stable_qdrant_id(effective_doc_id)
             points.append(
                 models.PointStruct(
                     id=point_id,
                     vector=vector.tolist(),
-                    payload={"content": doc.content, "doc_id": doc.doc_id or str(point_id), **doc.metadata},
+                    # Reserved fields are applied last so untrusted document
+                    # metadata cannot spoof the stored content or identity.
+                    payload={**doc.metadata, "content": doc.content, "doc_id": effective_doc_id},
                 )
             )
         self.client.upsert(collection_name=self.collection_name, points=points)
 
     def similarity_search(self, query: str, top_k: int = 5, filters: Optional[dict] = None) -> list[Document]:
         _, models = require_qdrant_client()
+        self._models = models
         query_vec = self.embedding_model.embed_query(query).tolist()
         q_filter = _to_qdrant_filter(filters, models) if filters else None
         hits = self.client.search(

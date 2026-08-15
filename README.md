@@ -5,6 +5,8 @@ Package Python autonome pour construire des pipelines RAG composables : ingestio
 
 Le package ne dépend pas de Dataiku. Les intégrations externes — OpenAI, sentence-transformers, PDF, DOCX — sont optionnelles.
 
+Cheragh vise une couverture large et composable, pas une promesse irréaliste d'exhaustivité. Le catalogue intégré distingue les composants stables, bêta, expérimentaux et planifiés, et documente les limites des implémentations inspirées de publications.
+
 ## Installation
 
 Depuis ce dossier :
@@ -23,6 +25,8 @@ pip install -e '.[openai]'         # OpenAILLMClient
 pip install -e '.[config]'         # YAML via PyYAML + validation Pydantic
 pip install -e '.[pdf]'            # ingestion PDF via pypdf
 pip install -e '.[docx]'           # ingestion DOCX via python-docx
+pip install -e '.[learned-retrieval]' # SPLADE + encodeur token-level pour ColBERT
+pip install -e '.[multimodal]'     # retrieval texte/image avec adaptateur CLIP
 pip install -e '.[all]'            # intégrations principales
 ```
 
@@ -47,6 +51,8 @@ response = engine.ask("Qu'est-ce que le RAG ?")
 print(response.answer)
 print(response.sources)
 ```
+
+`HashingEmbedding` est un baseline lexical déterministe, pas un modèle sémantique entraîné. Pour une branche dense sémantique, utilisez `SentenceTransformerEmbedding` ou un provider d'embeddings.
 
 ## Ingestion + chunking
 
@@ -179,6 +185,14 @@ cheragh ask "Que dit la documentation ?" --index ./index --openai-model gpt-4o-m
 cheragh eval evalset.jsonl --index ./index --top-k 5
 ```
 
+Lister la couverture et sa maturité :
+
+```bash
+cheragh techniques list
+cheragh techniques list --status experimental --json
+cheragh techniques show self-rag
+```
+
 ## Évaluation retrieval
 
 ```python
@@ -201,31 +215,19 @@ Métriques incluses :
 
 ## Techniques RAG incluses
 
-| Couche | Technique | Classe |
+Le catalogue Python et la commande `cheragh techniques` sont la source de vérité. Aperçu des familles principales :
+
+| Famille | Techniques | Maturité |
 | --- | --- | --- |
-| API | Engine haut niveau | `RAGEngine` |
-| Ingestion | Loaders + chunkers | `load_documents`, `chunk_documents` |
-| Vector store | Store local NumPy | `MemoryVectorStore` |
-| Retrieval | Hybrid Search | `HybridSearchRetriever` |
-| Retrieval | Cross-Encoder Reranking | `RerankingRetriever` |
-| Retrieval | HyDE | `HyDERetriever` |
-| Retrieval | RAG-Fusion | `RAGFusionRetriever` |
-| Retrieval | Parent Document | `ParentDocumentRetriever` |
-| Query | Self-Query | `SelfQueryRetriever` |
-| Query | Contextual Compression | `ContextualCompressionRetriever` |
-| Query | Query Decomposition | `QueryDecompositionRetriever` |
-| Query | Step-Back | `StepBackRetriever` |
-| Query | MMR | `MMRRetriever` |
-| Orchestration | Corrective RAG / CRAG | `CorrectiveRAGRetriever` |
-| Indexing | Sentence Window | `SentenceWindowRetriever` |
-| Indexing | HyQE | `HyQERetriever` |
-| Indexing | Semantic Chunking | `SemanticChunker` |
-| Orchestration | Router / Ensemble | `QueryRouter`, `EnsembleRetriever` |
-| Hierarchical | RAPTOR | `RAPTORRetriever` |
-| Iterative | FLARE | `FLAREPipeline` |
-| Indexing | Propositional Retrieval | `PropositionalRetriever` |
-| Post-processing | Chain-of-Note | `ChainOfNoteRetriever` |
-| Control | Adaptive Retrieval | `AdaptiveRetriever` |
+| Retrieval classique | BM25, dense, hybride, RRF, reranking | stable / bêta |
+| Retrieval appris | SPLADE exact, ColBERT MaxSim exact | expérimental |
+| Transformations | HyDE, HyQE, RAG-Fusion, Self-Query, Step-Back, décomposition | expérimental |
+| Contexte | compression, MMR, sentence-window, parent-child, propositions | bêta / expérimental |
+| Orchestration | CRAG, Self-RAG inférence, Agentic RAG, multi-hop, RAPTOR, GraphRAG-lite, FLARE | bêta / expérimental |
+| Données | SQL/structured, fédéré, conversationnel, multimodal texte/image | bêta / expérimental |
+| Gouvernance | ACL, isolation tenant/collection, cache sûr par défaut | bêta |
+
+Les entrées `planned` rendent explicites les axes encore absents, notamment Community GraphRAG, ColPali, Temporal RAG et l'entraînement retrieval-aware.
 
 ## Tests
 
@@ -267,7 +269,7 @@ Ajouts majeurs :
 - `py.typed`
 - extras packaging plus complets
 
-Limitation connue : le cache historique de certains retrievers reste basé sur `pickle` pour compatibilité avec les techniques existantes. Le nouveau `MemoryVectorStore` utilise en revanche un format `JSONL + NPY` plus sûr et inspectable.
+Compatibilité : le cache historique `pickle` est désactivé par défaut et nécessite un opt-in explicite pour des fichiers de confiance. Le `MemoryVectorStore` utilise un format `JSONL + NPY` inspectable.
 
 ## Notes de version 0.3.0
 
@@ -523,3 +525,18 @@ cheragh doctor
 ```
 
 See `docs/release_v100.md` and `examples/presets/production_v100.yaml` for production defaults.
+
+## v1.1.0 — sécurité et RAG moderne
+
+Cette version ajoute :
+
+- isolation tenant/collection sans auto-attribution de droits et ACL strictes en mode fail-closed ;
+- cache legacy `pickle` désactivé par défaut ;
+- indexation incrémentale qui exclut son propre output et réutilise les embeddings inchangés ;
+- Self-RAG d'inférence avec critique de pertinence/support et raffinement borné ;
+- Agentic RAG avec boucle plan/action/observation bornée et outils explicitement allowlistés ;
+- SPLADE exact en mémoire et ColBERT MaxSim exact avec encodeurs injectables ;
+- RAG multimodal texte/image, provenance média et adaptateur CLIP optionnel ;
+- catalogue machine-readable avec statuts et limites : `cheragh techniques list/show`.
+
+Voir `docs/release_v110.md` pour les contrats et exemples des nouvelles API.

@@ -77,7 +77,10 @@ class V080HardeningTests(unittest.TestCase):
 
             engine = SQLRAGEngine(database=db_path, table_allowlist=["sales"], read_only=True)
             self.assertEqual(engine.execute_sql("SELECT SUM(revenue) AS total FROM sales").rows[0]["total"], 100)
-            with self.assertRaises(sqlite3.OperationalError):
+            # SQLite may report either "readonly" (OperationalError) or
+            # "not authorized" (DatabaseError) depending on whether the URI
+            # guard or the permanent authorizer rejects the write first.
+            with self.assertRaises(sqlite3.DatabaseError):
                 engine.connection.execute("INSERT INTO sales VALUES ('Beta', 1)")
 
     def test_pydantic_config_validation(self):

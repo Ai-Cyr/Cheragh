@@ -41,12 +41,14 @@ class SelfQueryRetriever(BaseRetriever):
         llm_client: LLMClient,
         metadata_schema: Dict[str, str],
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ):
         self.documents = documents
         self.embedding_model = embedding_model
         self.llm_client = llm_client
         self.metadata_schema = metadata_schema
         self._cache_path = cache_path
+        self._allow_unsafe_pickle = allow_unsafe_pickle
 
         self.doc_embeddings: Optional[np.ndarray] = None
         if not self._try_load_cache():
@@ -97,6 +99,7 @@ class SelfQueryRetriever(BaseRetriever):
             expected_content_hash=hash_documents(self.documents),
             expected_embedder_fp=embedder_fingerprint(self.embedding_model),
             expected_extra_fp=self._extra_fp(),
+            allow_unsafe_pickle=self._allow_unsafe_pickle,
         )
         if state is None:
             return False

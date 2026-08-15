@@ -44,6 +44,7 @@ class SemanticChunker:
         self,
         documents: List[Document],
         cache_path: Optional[str] = None,
+        allow_unsafe_pickle: bool = False,
     ) -> List[Document]:
         """Découpe avec cache optionnel. Même signature qu'avant + cache_path."""
         if cache_path:
@@ -53,6 +54,7 @@ class SemanticChunker:
                 expected_content_hash=hash_documents(documents),
                 expected_embedder_fp=embedder_fingerprint(self.embedding_model),
                 expected_extra_fp=self._extra_fp(),
+                allow_unsafe_pickle=allow_unsafe_pickle,
             )
             if cached is not None:
                 return cached["chunks"]
