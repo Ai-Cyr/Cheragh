@@ -33,7 +33,7 @@ Repository = "https://github.com/Ai-Cyr/Cheragh"
 
 [project.optional-dependencies]
 local = ["sentence-transformers>=2.2,<6"]
-openai = ["openai>=1.0,<3"]
+openai = ["openai>=1.0,<4"]
 cohere = ["cohere>=5.0,<6"]
 voyage = ["voyageai>=0.2,<1"]
 anthropic = ["anthropic>=0.25,<1"]
@@ -66,7 +66,7 @@ dev = [
 all = [
   "sentence-transformers>=5.0,<6",
   "Pillow>=10.0,<13",
-  "openai>=1.0,<3",
+  "openai>=1.0,<4",
   "cohere>=5.0,<6",
   "voyageai>=0.2,<1",
   "anthropic>=0.25,<1",
