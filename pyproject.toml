@@ -51,7 +51,7 @@ faiss = ["faiss-cpu>=1.7,<2"]
 chroma = ["chromadb>=0.5,<2"]
 qdrant = ["qdrant-client>=1.9,<2"]
 fastapi = ["fastapi>=0.110,<1", "uvicorn>=0.29,<1", "pydantic>=2,<3"]
-redis = ["redis>=5.0,<7"]
+redis = ["redis>=5.0,<9"]
 dev = [
   "pytest>=7,<9",
   "pytest-cov>=4,<8",
@@ -82,7 +82,7 @@ all = [
   "qdrant-client>=1.9,<2",
   "fastapi>=0.110,<1",
   "uvicorn>=0.29,<1",
-  "redis>=5.0,<7",
+  "redis>=5.0,<9",
 ]
 
 [project.scripts]
