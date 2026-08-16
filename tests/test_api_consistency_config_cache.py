@@ -395,7 +395,7 @@ class VectorStoreConsistencyTests(unittest.TestCase):
     def test_all_extra_satisfies_learned_retrieval_minimum(self):
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
         all_section = pyproject.split("all = [", 1)[1].split("]", 1)[0]
-        self.assertIn('"sentence-transformers>=5.0"', all_section)
+        self.assertIn('"sentence-transformers>=5.0,<6"', all_section)
 
 
 if __name__ == "__main__":

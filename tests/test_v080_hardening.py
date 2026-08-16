@@ -117,9 +117,9 @@ class V080HardeningTests(unittest.TestCase):
         dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         constraints = (root / "docker" / "constraints.txt").read_text(encoding="utf-8")
-        self.assertIn("python:3.12.7-slim-bookworm", dockerfile)
+        self.assertIn("python:3.12.14-slim-bookworm", dockerfile)
         self.assertNotIn(":latest", compose)
-        self.assertIn("pip==24.3.1", dockerfile)
+        self.assertIn("PIP_VERSION=26.2.1", dockerfile)
         self.assertIn("fastapi==", constraints)
 
 

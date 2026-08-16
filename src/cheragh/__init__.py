@@ -336,7 +336,7 @@ if TYPE_CHECKING:
     from .workflow import TransformQueryNode as TransformQueryNode
     from .workflow import WorkflowResult as WorkflowResult
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 _LAZY_EXPORTS = {
     "embedder_fingerprint": (".cache", "embedder_fingerprint"),

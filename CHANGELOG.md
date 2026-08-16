@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.0
+
+- Harden the FastAPI boundary with fail-closed authentication on public binds, strict request models, payload and `top_k` limits, admission control, bounded operations, safe request IDs and redacted errors.
+- Add configurable provider timeouts and retries, exact environment-secret references and secret-safe normalized config output.
+- Validate and cap query transformations, retriever/compressor output and streaming chunks at every core engine trust boundary.
+- Make local vector snapshots checksummed and recoverable across interrupted writes; detect corrupt documents, manifests and embeddings before serving them.
+- Make incremental indexing detect source races, incomplete stores and configuration drift while using atomic manifests and process-safe locks.
+- Add thread-safe cache backends, per-key single-flight, a bounded LRU memory cache and safer Redis/SQLite failure handling.
+- Harden JSONL tracing for concurrent writers and monotonic latency measurement.
+- Add a non-root, read-only-friendly multi-stage container, a production deployment guide, a security policy and supply-chain CI gates.
+
+Cheragh remains a beta toolkit: production deployment still requires a TLS/API gateway, external secret management, rate limiting, backups, provider-specific evaluation and operational monitoring. The local memory store is intended for modest corpora, not horizontal multi-writer workloads.
+
 ## 1.3.0
 
 - Add strict long-context packing with source quotas, deduplication, optional truncation and lost-in-the-middle-aware ordering.

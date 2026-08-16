@@ -1,13 +1,19 @@
 """Dependency-free vector store backed by NumPy arrays."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import math
 import os
 import re
+import shutil
 import tempfile
-from typing import TYPE_CHECKING, Any, Iterable, Optional
+import threading
+import time
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional
 
 from ..base import (
     BaseRetriever,
@@ -25,7 +31,7 @@ if TYPE_CHECKING:  # pragma: no cover
     import numpy as np
 
 
-_STORE_MANIFEST_SCHEMA_VERSION = 2
+_STORE_MANIFEST_SCHEMA_VERSION = 3
 _HASHING_FINGERPRINT = re.compile(
     r"^HashingEmbedding::(?P<dimension>[1-9][0-9]*)::\(\s*(?P<min_n>[1-9][0-9]*)\s*,\s*(?P<max_n>[1-9][0-9]*)\s*\)$"
 )
@@ -42,55 +48,89 @@ class MemoryVectorStore:
         self.embedding_model = embedding_model
         self.documents: list[Document] = []
         self.embeddings: np.ndarray | None = None
+        self._data_lock = threading.RLock()
+        # Provider clients are not uniformly thread-safe. Serialize access to a
+        # model instance while allowing persistence and scoring to use stable
+        # snapshots without holding this lock.
+        self._embedding_lock = threading.RLock()
 
     def add_documents(self, documents: Iterable[Document]) -> None:
         np = _numpy()
-        new_docs = _snapshot_documents(documents)
+        materialized = list(documents)
+        for index, document in enumerate(materialized):
+            _validate_document(document, label=f"documents[{index}]")
+        new_docs = _snapshot_documents(materialized)
         if not new_docs:
             return
-        new_embeddings = np.asarray(self.embedding_model.embed_documents([doc.content for doc in new_docs]))
+        with self._embedding_lock:
+            new_embeddings = np.asarray(self.embedding_model.embed_documents([doc.content for doc in new_docs]))
         if new_embeddings.ndim != 2 or new_embeddings.shape[0] != len(new_docs):
             raise ValueError(
                 "Embedding model returned an invalid matrix: expected "
                 f"({len(new_docs)}, dimension), got {new_embeddings.shape}"
             )
+        _validate_finite_embeddings(new_embeddings, label="embedding model output")
+        new_embeddings = new_embeddings.astype(float, copy=True)
+        _validate_finite_embeddings(new_embeddings, label="embedding model output")
         expected_dimension = _known_embedding_dimension(self.embedding_model)
         if expected_dimension is not None and new_embeddings.shape[1] != expected_dimension:
             raise ValueError(
                 "Embedding dimension mismatch: "
                 f"model declares {expected_dimension}, returned {new_embeddings.shape[1]}"
             )
-        if self.embeddings is not None and len(self.embeddings) and self.embeddings.shape[1] != new_embeddings.shape[1]:
-            raise ValueError(
-                "Embedding dimension mismatch: "
-                f"store contains {self.embeddings.shape[1]}, got {new_embeddings.shape[1]}"
-            )
-        self.documents.extend(new_docs)
-        if self.embeddings is None or len(self.embeddings) == 0:
-            self.embeddings = new_embeddings
-        else:
-            self.embeddings = np.vstack([self.embeddings, new_embeddings])
+        with self._data_lock:
+            current_embeddings = self.embeddings
+            if (
+                current_embeddings is not None
+                and len(current_embeddings)
+                and current_embeddings.shape[1] != new_embeddings.shape[1]
+            ):
+                raise ValueError(
+                    "Embedding dimension mismatch: "
+                    f"store contains {current_embeddings.shape[1]}, got {new_embeddings.shape[1]}"
+                )
+            # Publish documents and vectors together under the data lock. New
+            # containers keep snapshots already held by readers immutable.
+            self.documents = [*self.documents, *new_docs]
+            if current_embeddings is None or len(current_embeddings) == 0:
+                self.embeddings = new_embeddings.copy()
+            else:
+                self.embeddings = np.vstack([current_embeddings, new_embeddings])
 
     def similarity_search(self, query: str, top_k: int = 5, filters: Optional[dict] = None) -> list[Document]:
         top_k = _validate_top_k(top_k)
         np = _numpy()
-        if not self.documents or self.embeddings is None:
+        with self._data_lock:
+            documents = tuple(self.documents)
+            embeddings = self.embeddings
+        if not documents or embeddings is None:
             return []
-        candidate_indices = self._matching_indices(filters)
+        with self._embedding_lock:
+            query_vec = np.asarray(self.embedding_model.embed_query(query))
+        if query_vec.ndim != 1:
+            raise ValueError(f"Embedding model returned an invalid query vector shape: {query_vec.shape}")
+        _validate_finite_embeddings(query_vec, label="query embedding")
+        query_vec = query_vec.astype(float, copy=True)
+        _validate_finite_embeddings(query_vec, label="query embedding")
+        if query_vec.shape[0] != embeddings.shape[1]:
+            raise ValueError(
+                "Embedding dimension mismatch: "
+                f"store contains {embeddings.shape[1]}, query has {query_vec.shape[0]}"
+            )
+        candidate_indices = self._matching_indices_in(documents, filters)
         if not candidate_indices:
             return []
-        query_vec = self.embedding_model.embed_query(query)
-        matrix = self.embeddings[candidate_indices]
+        matrix = embeddings[candidate_indices]
         scores = cosine_similarity(query_vec, matrix)
         order = np.argsort(scores)[::-1][:top_k]
         results: list[Document] = []
         for local_idx in order:
             idx = candidate_indices[int(local_idx)]
-            doc = self.documents[idx]
+            doc = documents[idx]
             results.append(
                 Document(
                     content=doc.content,
-                    metadata=dict(doc.metadata),
+                    metadata=deepcopy(doc.metadata),
                     doc_id=doc.doc_id,
                     score=float(scores[int(local_idx)]),
                 )
@@ -113,13 +153,16 @@ class MemoryVectorStore:
         p.mkdir(parents=True, exist_ok=True)
         np = _numpy()
         known_dimension = _known_embedding_dimension(self.embedding_model)
-        embeddings = self.embeddings
+        with self._data_lock:
+            documents = _snapshot_documents(self.documents)
+            embeddings = None if self.embeddings is None else self.embeddings.copy()
         if embeddings is None:
             embeddings = np.zeros((0, known_dimension or 0))
         if embeddings.ndim != 2:
             raise ValueError(f"Cannot save vector store: embeddings must be 2D, got shape {embeddings.shape}")
-        if embeddings.shape[0] != len(self.documents):
+        if embeddings.shape[0] != len(documents):
             raise ValueError("Cannot save vector store: document count != embedding count")
+        _validate_finite_embeddings(embeddings, label="stored embeddings")
         if known_dimension is not None and embeddings.shape[1] not in {0, known_dimension}:
             raise ValueError(
                 "Cannot save vector store: embedding dimension mismatch "
@@ -128,43 +171,14 @@ class MemoryVectorStore:
         dimension = int(embeddings.shape[1] or known_dimension or 0)
         manifest = {
             "schema_version": _STORE_MANIFEST_SCHEMA_VERSION,
-            "count": len(self.documents),
+            "count": len(documents),
             "dimension": dimension,
             "embedding_model": self.embedding_model.get_fingerprint(),
         }
         embedding_descriptor = _embedding_descriptor(self.embedding_model)
         if embedding_descriptor is not None:
             manifest["embedding"] = embedding_descriptor
-        staged: list[tuple[Path, Path]] = []
-        try:
-            staged.append(
-                (
-                    _stage_documents(p, self.documents),
-                    p / "documents.jsonl",
-                )
-            )
-            staged.append((_stage_embeddings(p, embeddings), p / "embeddings.npy"))
-            staged.append(
-                (
-                    _stage_text(
-                        p,
-                        "manifest",
-                        json.dumps(manifest, ensure_ascii=False, indent=2),
-                    ),
-                    p / "manifest.json",
-                )
-            )
-            # ``staged`` is ordered documents, embeddings, manifest; commit the
-            # manifest last so readers can use it as the snapshot marker.
-            for temporary_path, destination in staged:
-                os.replace(temporary_path, destination)
-            _fsync_directory(p)
-        finally:
-            for temporary_path, _ in staged:
-                try:
-                    temporary_path.unlink()
-                except FileNotFoundError:
-                    pass
+        _persist_store_snapshot(p, documents, embeddings, manifest)
 
     @classmethod
     def load(
@@ -181,46 +195,10 @@ class MemoryVectorStore:
         be supplied by the caller.
         """
         p = Path(path)
-        manifest = _read_store_manifest(p)
-        if embedding_model is None:
-            embedding_model = _hashing_embedding_from_manifest(manifest)
-        _validate_embedding_model(manifest, embedding_model)
-        store = cls(embedding_model=embedding_model)
-        docs_path = p / "documents.jsonl"
-        embeddings_path = p / "embeddings.npy"
-        if not docs_path.exists() or not embeddings_path.exists():
-            raise FileNotFoundError(f"Missing vector store files in {p}")
-        with docs_path.open("r", encoding="utf-8") as f:
-            store.documents = [_document_from_dict(json.loads(line)) for line in f if line.strip()]
-        np = _numpy()
-        store.embeddings = np.load(embeddings_path, allow_pickle=False)
-        if store.embeddings.ndim != 2:
-            raise ValueError(
-                "Vector store is corrupted: embeddings must be a 2D matrix, "
-                f"got shape {store.embeddings.shape}"
-            )
-        if len(store.documents) != len(store.embeddings):
-            raise ValueError("Vector store is corrupted: document count != embedding count")
-        manifest_count = int(manifest["count"])
-        if manifest_count != len(store.documents):
-            raise ValueError(
-                "Vector store is corrupted: manifest count "
-                f"{manifest_count} != document count {len(store.documents)}"
-            )
-        manifest_dimension = manifest.get("dimension")
-        stored_dimension = int(store.embeddings.shape[1])
-        if manifest_dimension is not None and stored_dimension and int(manifest_dimension) != stored_dimension:
-            raise ValueError(
-                "Vector store is corrupted: manifest embedding dimension "
-                f"{manifest_dimension} != stored dimension {stored_dimension}"
-            )
-        model_dimension = _known_embedding_dimension(embedding_model)
-        if model_dimension is not None and stored_dimension and model_dimension != stored_dimension:
-            raise ValueError(
-                "Embedding dimension mismatch for vector store: "
-                f"index uses {stored_dimension}, provided model uses {model_dimension}"
-            )
-        return store
+        if not p.is_dir():
+            raise FileNotFoundError(f"Missing vector store directory: {p}")
+        with _store_file_lock(p, exclusive=False):
+            return _load_store_snapshot(cls, p, embedding_model)
 
     @classmethod
     def embedding_model_from_manifest(cls, path: str | Path) -> EmbeddingModel:
@@ -234,10 +212,17 @@ class MemoryVectorStore:
         return _hashing_embedding_from_manifest(_read_store_manifest(Path(path)))
 
     def _matching_indices(self, filters: Optional[dict]) -> list[int]:
+        with self._data_lock:
+            documents = tuple(self.documents)
+        return self._matching_indices_in(documents, filters)
+
+    @staticmethod
+    def _matching_indices_in(documents: Iterable[Document], filters: Optional[dict]) -> list[int]:
+        documents = tuple(documents)
         if not filters:
-            return list(range(len(self.documents)))
+            return list(range(len(documents)))
         matches: list[int] = []
-        for idx, doc in enumerate(self.documents):
+        for idx, doc in enumerate(documents):
             if metadata_matches(doc.metadata, filters):
                 matches.append(idx)
         return matches
@@ -254,6 +239,77 @@ class VectorStoreRetriever(BaseRetriever):
         return self.store.similarity_search(query, top_k=top_k, filters=self.filters)
 
 
+def _load_store_snapshot(
+    store_class: type[MemoryVectorStore],
+    directory: Path,
+    embedding_model: EmbeddingModel | None,
+) -> MemoryVectorStore:
+    manifest = _read_store_manifest(directory)
+    if embedding_model is None:
+        embedding_model = _hashing_embedding_from_manifest(manifest)
+    _validate_embedding_model(manifest, embedding_model)
+    store = store_class(embedding_model=embedding_model)
+    docs_path = _snapshot_data_path(directory, manifest, "documents", "documents.jsonl")
+    embeddings_path = _snapshot_data_path(directory, manifest, "embeddings", "embeddings.npy")
+    if not docs_path.exists() or not embeddings_path.exists():
+        raise FileNotFoundError(f"Missing vector store files in {directory}")
+    # Authenticate the bounded snapshot before parsing JSON or allowing NumPy
+    # to interpret the NPY header/data.
+    _validate_snapshot_integrity(manifest, "documents", docs_path)
+    _validate_snapshot_integrity(manifest, "embeddings", embeddings_path)
+    with docs_path.open("r", encoding="utf-8") as file:
+        documents: list[Document] = []
+        for line_number, line in enumerate(file, start=1):
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+                document = _document_from_dict(payload)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Vector store is corrupted: invalid document at line {line_number}"
+                ) from exc
+            documents.append(document)
+        store.documents = documents
+    np = _numpy()
+    try:
+        store.embeddings = np.load(embeddings_path, allow_pickle=False)
+    except (OSError, ValueError) as exc:
+        raise ValueError("Vector store is corrupted: invalid embeddings.npy") from exc
+    if store.embeddings.ndim != 2:
+        raise ValueError(
+            "Vector store is corrupted: embeddings must be a 2D matrix, "
+            f"got shape {store.embeddings.shape}"
+        )
+    _validate_finite_embeddings(store.embeddings, label="persisted embeddings", corruption=True)
+    store.embeddings = store.embeddings.astype(float, copy=True)
+    _validate_finite_embeddings(store.embeddings, label="persisted embeddings", corruption=True)
+    if len(store.documents) != len(store.embeddings):
+        raise ValueError("Vector store is corrupted: document count != embedding count")
+    manifest_count = int(manifest["count"])
+    if manifest_count != len(store.documents):
+        raise ValueError(
+            "Vector store is corrupted: manifest count "
+            f"{manifest_count} != document count {len(store.documents)}"
+        )
+    manifest_dimension = manifest.get("dimension")
+    stored_dimension = int(store.embeddings.shape[1])
+    if manifest_count > 0 and stored_dimension == 0:
+        raise ValueError("Vector store is corrupted: non-empty store has zero-dimensional embeddings")
+    if manifest_dimension is not None and stored_dimension and int(manifest_dimension) != stored_dimension:
+        raise ValueError(
+            "Vector store is corrupted: manifest embedding dimension "
+            f"{manifest_dimension} != stored dimension {stored_dimension}"
+        )
+    model_dimension = _known_embedding_dimension(embedding_model)
+    if model_dimension is not None and stored_dimension and model_dimension != stored_dimension:
+        raise ValueError(
+            "Embedding dimension mismatch for vector store: "
+            f"index uses {stored_dimension}, provided model uses {model_dimension}"
+        )
+    return store
+
+
 def _read_store_manifest(directory: Path) -> dict[str, Any]:
     manifest_path = directory / "manifest.json"
     if not manifest_path.exists():
@@ -266,7 +322,7 @@ def _read_store_manifest(directory: Path) -> dict[str, Any]:
         raise ValueError("Invalid vector store manifest: expected a JSON object")
 
     schema_version = _manifest_integer(data.get("schema_version", 1), "schema_version", minimum=1)
-    if schema_version not in {1, _STORE_MANIFEST_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, _STORE_MANIFEST_SCHEMA_VERSION}:
         raise ValueError(f"Unsupported vector store manifest schema_version: {schema_version}")
     data["schema_version"] = schema_version
     data["count"] = _manifest_integer(data.get("count"), "count", minimum=0)
@@ -281,6 +337,26 @@ def _read_store_manifest(directory: Path) -> dict[str, Any]:
     descriptor = data.get("embedding")
     if descriptor is not None and not isinstance(descriptor, dict):
         raise ValueError("Invalid vector store manifest: embedding must be an object")
+    if schema_version >= 3:
+        for field, expected_filename in (
+            ("documents", "documents.jsonl"),
+            ("embeddings", "embeddings.npy"),
+        ):
+            integrity = data.get(field)
+            if not isinstance(integrity, dict):
+                raise ValueError(f"Invalid vector store manifest: {field} must be an object")
+            if integrity.get("filename") != expected_filename:
+                raise ValueError(
+                    f"Invalid vector store manifest: {field}.filename must be {expected_filename!r}"
+                )
+            digest = integrity.get("sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError(f"Invalid vector store manifest: {field}.sha256 must be lowercase SHA-256")
+            integrity["size_bytes"] = _manifest_integer(
+                integrity.get("size_bytes"),
+                f"{field}.size_bytes",
+                minimum=0,
+            )
     return data
 
 
@@ -332,7 +408,11 @@ def _validate_embedding_model(manifest: dict[str, Any], embedding_model: Embeddi
         )
     expected_dimension = manifest.get("dimension")
     actual_dimension = _known_embedding_dimension(embedding_model)
-    if expected_dimension not in {None, 0} and actual_dimension is not None and int(expected_dimension) != actual_dimension:
+    if (
+        expected_dimension not in {None, 0}
+        and actual_dimension is not None
+        and int(expected_dimension) != actual_dimension
+    ):
         raise ValueError(
             "Embedding dimension mismatch for vector store: "
             f"index expects {expected_dimension}, provided model uses {actual_dimension}"
@@ -376,17 +456,456 @@ def _embedding_descriptor(embedding_model: EmbeddingModel) -> dict[str, Any] | N
     }
 
 
+_PROCESS_PERSISTENCE_LOCK = threading.RLock()
+
+
+def _persist_store_snapshot(
+    directory: Path,
+    documents: list[Document],
+    embeddings: np.ndarray,
+    manifest: dict[str, Any],
+) -> None:
+    """Commit a recoverable multi-file store snapshot.
+
+    Data files are staged and fsynced first. Schema-v3 manifests authenticate
+    both files and are replaced only after their directory entries are durable.
+    Before replacing an existing v3 snapshot, hard-linked recovery copies keep
+    the manifest's previous generation readable if the process dies halfway
+    through the two data-file replacements.
+    """
+
+    with _store_file_lock(directory):
+        previous = None
+        if (directory / "manifest.json").exists():
+            previous = _read_store_manifest(directory)
+            previous = _upgrade_legacy_manifest(directory, previous)
+        staged: list[tuple[Path, Path]] = []
+        backups: list[tuple[Path, Path]] = []
+        committed = False
+        try:
+            documents_stage = _stage_documents(directory, documents)
+            staged.append((documents_stage, directory / "documents.jsonl"))
+            embeddings_stage = _stage_embeddings(directory, embeddings)
+            staged.append((embeddings_stage, directory / "embeddings.npy"))
+            manifest["documents"] = _file_descriptor(documents_stage, "documents.jsonl")
+            manifest["embeddings"] = _file_descriptor(embeddings_stage, "embeddings.npy")
+            manifest_stage = _stage_text(
+                directory,
+                "manifest",
+                json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False),
+            )
+            staged.append((manifest_stage, directory / "manifest.json"))
+
+            if previous is not None:
+                backups = _create_snapshot_backups(directory, previous)
+                if backups:
+                    _fsync_directory(directory)
+
+            # Keep the historical destination names and commit marker while
+            # making the prior generation recoverable through authenticated
+            # backup hard links.
+            os.replace(documents_stage, directory / "documents.jsonl")
+            os.replace(embeddings_stage, directory / "embeddings.npy")
+            _fsync_directory(directory)
+            os.replace(manifest_stage, directory / "manifest.json")
+            _fsync_directory(directory)
+            committed = True
+        except Exception:
+            if backups:
+                _restore_snapshot_backups(directory, backups)
+            raise
+        finally:
+            for temporary_path, _ in staged:
+                temporary_path.unlink(missing_ok=True)
+            if committed:
+                removed_backup = False
+                for pattern in (
+                    ".documents.*.snapshot",
+                    ".embeddings.*.snapshot",
+                    ".manifest.*.snapshot",
+                ):
+                    for backup_path in directory.glob(pattern):
+                        backup_path.unlink(missing_ok=True)
+                        removed_backup = True
+                if removed_backup:
+                    _fsync_directory(directory)
+
+
+@contextmanager
+def _store_file_lock(
+    directory: Path,
+    timeout: float = 30.0,
+    *,
+    exclusive: bool = True,
+) -> Iterator[None]:
+    """Serialize saves across threads and, where available, processes."""
+
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not math.isfinite(float(timeout))
+        or timeout < 0
+    ):
+        raise ValueError("vector store lock timeout must be a finite number >= 0")
+    lock_path = directory / ".store.lock"
+    with _PROCESS_PERSISTENCE_LOCK:
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - Windows fallback
+            with _portable_store_file_lock(
+                directory / ".store.lock.portable",
+                timeout=float(timeout),
+                read_only=not exclusive,
+            ):
+                yield
+            return
+        if exclusive:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        else:
+            try:
+                fd = os.open(lock_path, os.O_RDONLY)
+            except FileNotFoundError:
+                try:
+                    fd = os.open(lock_path, os.O_CREAT | os.O_RDONLY, 0o600)
+                except PermissionError:  # Read-only legacy index; no writer can race.
+                    yield
+                    return
+        try:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                    fcntl.flock(fd, operation | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f"Vector store is locked: {lock_path}")
+                    time.sleep(min(0.05, remaining))
+            try:
+                if exclusive:
+                    os.ftruncate(fd, 0)
+                    os.write(fd, f"pid={os.getpid()}\n".encode("ascii"))
+                    os.fsync(fd)
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+@contextmanager
+def _portable_store_file_lock(
+    lock_path: Path,
+    *,
+    timeout: float,
+    read_only: bool,
+) -> Iterator[None]:
+    deadline = time.monotonic() + timeout
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(
+                fd,
+                json.dumps({"pid": os.getpid(), "acquired_at": time.time()}).encode("ascii"),
+            )
+            os.fsync(fd)
+        except FileExistsError:
+            if _remove_abandoned_store_lock(lock_path):
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Vector store is locked: {lock_path}")
+            time.sleep(min(0.05, remaining))
+        except PermissionError:
+            if fd is not None:
+                os.close(fd)
+                fd = None
+                lock_path.unlink(missing_ok=True)
+            if read_only:
+                # A read-only directory cannot have a concurrent local writer.
+                yield
+                return
+            raise
+        except Exception:
+            if fd is not None:
+                os.close(fd)
+                fd = None
+                lock_path.unlink(missing_ok=True)
+            raise
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        lock_path.unlink(missing_ok=True)
+
+
+def _remove_abandoned_store_lock(lock_path: Path) -> bool:
+    try:
+        stat = lock_path.stat()
+        payload = json.loads(lock_path.read_text(encoding="ascii"))
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        try:
+            if time.time() - lock_path.stat().st_mtime < 300:
+                return False
+        except OSError:
+            return True
+    else:
+        pid = payload.get("pid") if isinstance(payload, dict) else None
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pass
+            except (PermissionError, OSError):
+                return False
+            else:
+                return False
+        elif time.time() - stat.st_mtime < 300:
+            return False
+    try:
+        lock_path.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _file_descriptor(path: Path, filename: str) -> dict[str, Any]:
+    return {
+        "filename": filename,
+        "sha256": _file_sha256(path),
+        "size_bytes": path.stat().st_size,
+    }
+
+
+def _upgrade_legacy_manifest(directory: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Make a valid v1/v2 snapshot recoverable before its first v3 rewrite."""
+
+    if int(manifest.get("schema_version", 1)) >= 3:
+        return manifest
+    documents = directory / "documents.jsonl"
+    embeddings = directory / "embeddings.npy"
+    if not documents.is_file() or not embeddings.is_file():
+        # No complete prior generation exists; the explicit save is a repair.
+        return manifest
+    upgraded = dict(manifest)
+    upgraded["schema_version"] = 3
+    upgraded["documents"] = _file_descriptor(documents, "documents.jsonl")
+    upgraded["embeddings"] = _file_descriptor(embeddings, "embeddings.npy")
+    temporary = _stage_text(
+        directory,
+        "manifest-upgrade",
+        json.dumps(upgraded, ensure_ascii=False, indent=2, allow_nan=False),
+    )
+    try:
+        os.replace(temporary, directory / "manifest.json")
+        _fsync_directory(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return _read_store_manifest(directory)
+
+
+def _create_snapshot_backups(
+    directory: Path,
+    manifest: dict[str, Any],
+) -> list[tuple[Path, Path]]:
+    if int(manifest.get("schema_version", 1)) < 3:
+        return []
+    candidates: list[tuple[str, Path, str]] = []
+    for field, default_name in (("documents", "documents.jsonl"), ("embeddings", "embeddings.npy")):
+        descriptor = manifest[field]
+        source = directory / default_name
+        expected = str(descriptor["sha256"])
+        # There is no valid previous generation to preserve when a user is
+        # explicitly repairing an already incomplete/corrupt snapshot.
+        if not source.exists() or _file_sha256(source) != expected:
+            return []
+        candidates.append((field, source, expected))
+    # The manifest is the commit marker and must be part of the same rollback
+    # set as its authenticated data.  It is deliberately appended last so a
+    # restoration never publishes it before the old data files are back.
+    manifest_path = directory / "manifest.json"
+    candidates.append(("manifest", manifest_path, _file_sha256(manifest_path)))
+    backups: list[tuple[Path, Path]] = []
+    for field, source, expected in candidates:
+        backup = _snapshot_backup_path(directory, field, expected)
+        if backup.exists() and _file_sha256(backup) != expected:
+            backup.unlink()
+        if not backup.exists():
+            try:
+                os.link(source, backup)
+            except OSError:  # pragma: no cover - filesystem-specific fallback
+                _copy_file_durable(source, backup)
+        backups.append((backup, source))
+    return backups
+
+
+def _restore_snapshot_backups(directory: Path, backups: list[tuple[Path, Path]]) -> None:
+    # Restore the commit marker last.  This preserves the invariant that every
+    # visible manifest references a complete on-disk data generation, including
+    # when the failed operation was the directory fsync after manifest replace.
+    ordered = sorted(backups, key=lambda item: item[1].name == "manifest.json")
+    for backup, destination in ordered:
+        if not backup.exists():
+            continue
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.restore.", dir=directory)
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            temporary.unlink()
+            try:
+                os.link(backup, temporary)
+            except OSError:  # pragma: no cover - filesystem-specific fallback
+                _copy_file_durable(backup, temporary)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+    _fsync_directory(directory)
+
+
+def _copy_file_durable(source: Path, destination: Path) -> None:
+    with source.open("rb") as source_file, destination.open("xb") as destination_file:
+        shutil.copyfileobj(source_file, destination_file)
+        destination_file.flush()
+        os.fsync(destination_file.fileno())
+
+
+def _snapshot_backup_path(directory: Path, field: str, sha256: str) -> Path:
+    return directory / f".{field}.{sha256}.snapshot"
+
+
 def _document_to_dict(doc: Document) -> dict:
     return {"content": doc.content, "metadata": doc.metadata, "doc_id": doc.doc_id, "score": doc.score}
 
 
 def _document_from_dict(data: dict) -> Document:
-    return Document(
-        content=data.get("content", ""),
-        metadata=data.get("metadata") or {},
+    if not isinstance(data, dict):
+        raise TypeError("persisted document must be a JSON object")
+    if "content" not in data:
+        raise ValueError("persisted document is missing content")
+    metadata = data.get("metadata", {})
+    if metadata is None:
+        metadata = {}
+    document = Document(
+        content=data["content"],
+        metadata=metadata,
         doc_id=data.get("doc_id"),
         score=data.get("score"),
     )
+    _validate_document(document, label="persisted document")
+    return document
+
+
+def _validate_document(document: Any, *, label: str) -> None:
+    if not isinstance(document, Document):
+        raise TypeError(f"{label} must be a Document")
+    if not isinstance(document.content, str) or not document.content.strip():
+        raise ValueError(f"{label}.content must be a non-empty string")
+    if not isinstance(document.metadata, dict):
+        raise TypeError(f"{label}.metadata must be a dict")
+    if document.doc_id is not None and not isinstance(document.doc_id, str):
+        raise TypeError(f"{label}.doc_id must be a string or None")
+    if document.score is not None:
+        if isinstance(document.score, bool) or not isinstance(document.score, (int, float)):
+            raise TypeError(f"{label}.score must be a finite number or None")
+        if not _is_finite_number(document.score):
+            raise ValueError(f"{label}.score must be finite")
+
+
+def _is_finite_number(value: int | float) -> bool:
+    return math.isfinite(float(value))
+
+
+def _validate_finite_embeddings(value: Any, *, label: str, corruption: bool = False) -> None:
+    np = _numpy()
+    array = np.asarray(value)
+    prefix = "Vector store is corrupted: " if corruption else ""
+    if (
+        not np.issubdtype(array.dtype, np.number)
+        or np.issubdtype(array.dtype, np.bool_)
+        or np.issubdtype(array.dtype, np.complexfloating)
+    ):
+        raise ValueError(f"{prefix}{label} must contain real numeric values")
+    try:
+        finite = bool(np.isfinite(array).all())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{prefix}{label} must contain numeric values") from exc
+    if not finite:
+        raise ValueError(f"{prefix}{label} contains non-finite values")
+
+
+def _snapshot_data_path(
+    directory: Path,
+    manifest: dict[str, Any],
+    field: str,
+    default_filename: str,
+) -> Path:
+    current = directory / default_filename
+    if int(manifest.get("schema_version", 1)) < 3:
+        return current
+    descriptor = manifest[field]
+    expected = str(descriptor["sha256"])
+    if current.exists() and _file_sha256(current) == expected:
+        return current
+    backup = _snapshot_backup_path(directory, field, expected)
+    if backup.exists() and _file_sha256(backup) == expected:
+        return backup
+    # Return the current file so semantic validation can retain specific legacy
+    # error messages (dimension/count) before the final checksum failure.
+    return current
+
+
+def _validate_snapshot_integrity(manifest: dict[str, Any], field: str, path: Path) -> None:
+    if int(manifest.get("schema_version", 1)) < 3:
+        return
+    descriptor = manifest[field]
+    size = path.stat().st_size
+    if size != int(descriptor["size_bytes"]):
+        _raise_npy_dimension_mismatch_if_known(manifest, field, path)
+        raise ValueError(f"Vector store is corrupted: {field} size mismatch")
+    if _file_sha256(path) != descriptor["sha256"]:
+        _raise_npy_dimension_mismatch_if_known(manifest, field, path)
+        raise ValueError(f"Vector store is corrupted: {field} checksum mismatch")
+
+
+def _raise_npy_dimension_mismatch_if_known(
+    manifest: dict[str, Any],
+    field: str,
+    path: Path,
+) -> None:
+    if field != "embeddings" or manifest.get("dimension") is None:
+        return
+    try:
+        np = _numpy()
+        with path.open("rb") as file:
+            version = np.lib.format.read_magic(file)
+            if version == (1, 0):
+                shape, _, _ = np.lib.format.read_array_header_1_0(file)
+            else:
+                shape, _, _ = np.lib.format.read_array_header_2_0(file)
+    except Exception:
+        return
+    if len(shape) == 2 and int(shape[1]) != int(manifest["dimension"]):
+        raise ValueError(
+            "Vector store is corrupted: manifest embedding dimension "
+            f"{manifest['dimension']} != stored dimension {shape[1]}"
+        )
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _stage_documents(directory: Path, documents: Iterable[Document]) -> Path:
@@ -395,7 +914,14 @@ def _stage_documents(directory: Path, documents: Iterable[Document]) -> Path:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             for document in documents:
-                file.write(json.dumps(_document_to_dict(document), ensure_ascii=False) + "\n")
+                file.write(
+                    json.dumps(
+                        _document_to_dict(document),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                    + "\n"
+                )
             file.flush()
             os.fsync(file.fileno())
     except Exception:

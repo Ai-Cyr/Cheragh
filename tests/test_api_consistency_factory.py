@@ -128,6 +128,8 @@ class APIFactoryConsistencyTests(unittest.TestCase):
         client.assert_called_once_with(
             model="compatible-model",
             api_key="test-key",
+            timeout=60.0,
+            max_retries=2,
             base_url="https://provider.example/v1",
         )
 

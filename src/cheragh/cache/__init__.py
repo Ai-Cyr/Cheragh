@@ -1,6 +1,7 @@
 """Advanced cache layer for embeddings, retrieval, reranking and LLM calls."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -46,19 +47,33 @@ def build_cache_backend(config: dict[str, Any] | None = None, **overrides: Any) 
     cfg = {**(config or {}), **{k: v for k, v in overrides.items() if v is not None}}
     if not cfg:
         return None
-    enabled = cfg.get("enabled", True)
-    if isinstance(enabled, str):
-        enabled = enabled.lower() not in {"0", "false", "no", "off"}
+    enabled = _as_bool(cfg.get("enabled", True), label="cache.enabled")
     if not enabled:
         return None
     backend = str(cfg.get("backend", cfg.get("type", "memory"))).lower().replace("_", "-")
-    ttl = cfg.get("ttl", cfg.get("default_ttl"))
-    ttl = float(ttl) if ttl not in {None, ""} else None
+    ttl_raw = cfg.get("ttl", cfg.get("default_ttl"))
+    if ttl_raw is None or ttl_raw == "":
+        ttl = None
+    else:
+        if isinstance(ttl_raw, bool) or not isinstance(ttl_raw, (int, float, str)):
+            raise ValueError("cache.ttl must be a finite number >= 0")
+        try:
+            ttl = float(ttl_raw)
+        except ValueError as exc:
+            raise ValueError("cache.ttl must be a finite number >= 0") from exc
+        if not math.isfinite(ttl) or ttl < 0:
+            raise ValueError("cache.ttl must be a finite number >= 0")
     namespace = str(cfg.get("namespace", "default"))
     serializer = str(cfg.get("serializer", "json")).lower().replace("_", "-")
     secret_key = cfg.get("secret_key") or cfg.get("hmac_key")
-    allow_pickle = _as_bool(cfg.get("allow_pickle", serializer in {"pickle", "signed-pickle"}))
-    allow_unsigned_pickle = _as_bool(cfg.get("allow_unsigned_pickle", False))
+    allow_pickle = _as_bool(
+        cfg.get("allow_pickle", serializer in {"pickle", "signed-pickle"}),
+        label="cache.allow_pickle",
+    )
+    allow_unsigned_pickle = _as_bool(
+        cfg.get("allow_unsigned_pickle", False),
+        label="cache.allow_unsigned_pickle",
+    )
     if serializer == "signed-pickle":
         if not secret_key:
             raise ValueError("cache.serializer='signed-pickle' requires cache.secret_key")
@@ -73,13 +88,15 @@ def build_cache_backend(config: dict[str, Any] | None = None, **overrides: Any) 
     if unsafe_persistent_pickle:
         raise ValueError("persistent pickle cache requires secret_key or allow_unsigned_pickle=True")
     if backend in {"memory", "in-memory", "mem"}:
-        return MemoryCache(default_ttl=ttl, namespace=namespace)
+        max_entries = _max_entries_from_config(cfg)
+        return MemoryCache(default_ttl=ttl, namespace=namespace, max_entries=max_entries)
     if backend in {"sqlite", "sqlite3"}:
         path = cfg.get("path") or cfg.get("cache_path") or ".cheragh/cache.sqlite"
         return SQLiteCache(
             Path(path),
             default_ttl=ttl,
             namespace=namespace,
+            max_entries=_max_entries_from_config(cfg),
             serializer=serializer,
             secret_key=secret_key,
             allow_pickle=allow_pickle,
@@ -101,10 +118,38 @@ def build_cache_backend(config: dict[str, Any] | None = None, **overrides: Any) 
     raise ValueError(f"Unsupported cache backend: {backend}")
 
 
-def _as_bool(value: Any) -> bool:
+def _as_bool(value: Any, *, label: str) -> bool:
+    """Parse a boolean without turning misspellings into an unsafe opt-in."""
+
+    if isinstance(value, bool):
+        return value
     if isinstance(value, str):
-        return value.lower() not in {"0", "false", "no", "off"}
-    return bool(value)
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(
+        f"{label} must be a boolean or one of: true, false, 1, 0, yes, no, on, off"
+    )
+
+
+def _max_entries_from_config(config: dict[str, Any]) -> int | None:
+    value = config.get("max_entries", 10_000)
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("cache.max_entries must be a positive integer")
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except ValueError as exc:
+            raise ValueError("cache.max_entries must be a positive integer") from exc
+    elif not isinstance(value, int):
+        raise ValueError("cache.max_entries must be a positive integer")
+    if value <= 0:
+        raise ValueError("cache.max_entries must be a positive integer")
+    return value
 
 
 __all__ = [

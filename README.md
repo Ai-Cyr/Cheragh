@@ -235,11 +235,15 @@ Les 44 entrées du catalogue ont ainsi une implémentation ou une baseline born�
 - ACL et isolation tenant/collection peuvent fonctionner en mode fail-closed ;
 - le chargement du cache historique `pickle` est désactivé par défaut ;
 - les prompts sont exclus des traces par défaut ;
+- les secrets peuvent être référencés par `${NOM_VARIABLE}` et sont masqués par `validate-config --json` ;
+- les appels réseau de génération et d'embeddings acceptent des timeouts bornés et, selon le fournisseur, des retries configurables ;
 - l'endpoint HTTP `POST /index` est désactivé par défaut et doit être borné avec `--index-root` s'il est activé ;
-- l'indexation locale exclut son propre output et utilise un verrou d'écriture ;
+- un bind HTTP non local exige une clé API ; les corps, `top_k`, opérations concurrentes et durées sont bornés par défaut ;
+- l'indexation locale exclut son propre output, utilise un verrou d'écriture et vérifie les snapshots par checksum ;
+- le cache mémoire est un LRU borné par défaut ;
 - `strict_grounding` et la validation de citations sont des garde-fous déterministes, pas une garantie contre les hallucinations.
 
-`MemoryVectorStore` convient aux prototypes et aux corpus modestes. Pour une charge importante, utilisez de vrais embeddings sémantiques, un vector store persistant, du reranking et des seuils d'évaluation adaptés. Voir le [guide de production](docs/production.md).
+`MemoryVectorStore` convient aux prototypes et aux corpus modestes. Pour une charge importante, utilisez de vrais embeddings sémantiques, un vector store persistant, du reranking et des seuils d'évaluation adaptés. Voir le [guide de production](docs/production.md) et les [limites du serveur HTTP](docs/production_server.md).
 
 ## Documentation
 

@@ -6,13 +6,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import hashlib
 import json
+import math
 import os
+import tempfile
 import time
 from typing import Any, Iterator, Sequence
 
 from .base import Document, EmbeddingModel, HashingEmbedding
 from .ingestion import chunk_documents, load_documents
-from .ingestion.pipeline import _combined_exclude_patterns, _is_excluded, _looks_binary
+from .ingestion.pipeline import (
+    _combined_exclude_patterns,
+    _is_excluded,
+    _looks_binary,
+    _resolve_contained_candidate,
+)
 from .vectorstores.memory import MemoryVectorStore
 
 
@@ -46,13 +53,35 @@ class IndexedFile:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "IndexedFile":
+        if not isinstance(data, dict):
+            raise ValueError("Invalid index manifest: each file entry must be an object")
+        path = data.get("path")
+        sha256 = data.get("sha256")
+        if not isinstance(path, str) or not path:
+            raise ValueError("Invalid index manifest: file path must be a non-empty string")
+        if not isinstance(sha256, str) or len(sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in sha256
+        ):
+            raise ValueError("Invalid index manifest: file sha256 must be lowercase SHA-256")
+        raw_doc_ids = data.get("doc_ids") or []
+        if not isinstance(raw_doc_ids, list) or any(not isinstance(doc_id, str) for doc_id in raw_doc_ids):
+            raise ValueError("Invalid index manifest: doc_ids must be a list of strings")
+        size_bytes = data.get("size_bytes", 0)
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0:
+            raise ValueError("Invalid index manifest: size_bytes must be an integer >= 0")
+        mtime = data.get("mtime", 0.0)
+        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)) or not math.isfinite(float(mtime)):
+            raise ValueError("Invalid index manifest: mtime must be finite")
+        status = data.get("status", "indexed")
+        if not isinstance(status, str) or not status:
+            raise ValueError("Invalid index manifest: status must be a non-empty string")
         return cls(
-            path=str(data.get("path", "")),
-            sha256=str(data.get("sha256", "")),
-            doc_ids=list(data.get("doc_ids") or []),
-            size_bytes=int(data.get("size_bytes", 0) or 0),
-            mtime=float(data.get("mtime", 0.0) or 0.0),
-            status=str(data.get("status", "indexed")),
+            path=path,
+            sha256=sha256,
+            doc_ids=list(raw_doc_ids),
+            size_bytes=size_bytes,
+            mtime=float(mtime),
+            status=status,
         )
 
 
@@ -73,8 +102,28 @@ class IndexManifest:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "IndexManifest":
-        files = {path: IndexedFile.from_dict(entry) for path, entry in (data.get("files") or {}).items()}
-        return cls(schema_version=int(data.get("schema_version", 3)), files=files, metadata=data.get("metadata") or {})
+        if not isinstance(data, dict):
+            raise ValueError("Invalid index manifest: expected a JSON object")
+        schema_version = data.get("schema_version", 3)
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise ValueError("Invalid index manifest: schema_version must be an integer")
+        if schema_version not in {1, 2, 3}:
+            raise ValueError(f"Unsupported index manifest schema_version: {schema_version}")
+        raw_files = data.get("files") or {}
+        if not isinstance(raw_files, dict):
+            raise ValueError("Invalid index manifest: files must be an object")
+        files: dict[str, IndexedFile] = {}
+        for path, entry in raw_files.items():
+            if not isinstance(path, str) or not path:
+                raise ValueError("Invalid index manifest: file keys must be non-empty strings")
+            parsed = IndexedFile.from_dict(entry)
+            if parsed.path != path:
+                raise ValueError("Invalid index manifest: file key/path mismatch")
+            files[path] = parsed
+        metadata = data.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            raise ValueError("Invalid index manifest: metadata must be an object")
+        return cls(schema_version=schema_version, files=files, metadata=metadata)
 
 
 @dataclass
@@ -139,12 +188,15 @@ def index_from_config(
     Remote or backend-specific vector stores must use their own ingestion API.
     """
 
-    from .config import load_raw_config
+    from .config import load_config
     from .config.schema import validate_config
 
     config_file = Path(config_path).expanduser().resolve()
     config_dir = config_file.parent
-    config = load_raw_config(config_file)
+    # Match RAGEngine's configuration semantics: resolve exact ${ENV_VAR}
+    # references before initial validation and before applying explicit caller
+    # overrides. Secret values are never included in resolution errors.
+    config = load_config(config_file, validate=False)
     validate_config(config)
 
     unknown = sorted(set(overrides) - set(_CONFIG_OVERRIDE_TARGETS))
@@ -256,6 +308,9 @@ def index_path(
     )
     embedder = embedding_model or HashingEmbedding()
     source_root = Path(path)
+    source_boundary = (
+        source_root.parent if source_root.is_file() else source_root
+    ).resolve(strict=True)
     output_path = Path(output)
     scan_excludes = list(options.exclude_patterns or ())
     if source_root.exists() and source_root.is_dir():
@@ -273,7 +328,11 @@ def index_path(
     if not options.dry_run:
         output_path.mkdir(parents=True, exist_ok=True)
 
-    with _index_lock(output_path, enabled=options.use_lock and not options.dry_run, timeout=options.lock_timeout_seconds):
+    with _index_lock(
+        output_path,
+        enabled=options.use_lock and not options.dry_run,
+        timeout=options.lock_timeout_seconds,
+    ):
         previous = load_manifest(output_path) if options.incremental else IndexManifest()
         current_entries, skipped = scan_indexable_files(
             source_root,
@@ -297,6 +356,21 @@ def index_path(
                 or previous_indexing_options != current_indexing_options
             )
         )
+        required_store_files = (
+            output_path / "documents.jsonl",
+            output_path / "embeddings.npy",
+            output_path / "manifest.json",
+        )
+        store_files_available = all(file_path.is_file() for file_path in required_store_files)
+        expected_store_manifest_sha256 = previous.metadata.get("vector_store_manifest_sha256")
+        store_snapshot_changed = bool(previous.files and not store_files_available)
+        if previous.files and store_files_available and isinstance(expected_store_manifest_sha256, str):
+            try:
+                store_snapshot_changed = (
+                    file_sha256(output_path / "manifest.json") != expected_store_manifest_sha256
+                )
+            except OSError:
+                store_snapshot_changed = True
         plan = plan_incremental_update(
             previous,
             current_entries,
@@ -305,6 +379,7 @@ def index_path(
                 or not options.incremental
                 or embedding_changed
                 or indexing_options_changed
+                or store_snapshot_changed
             ),
         )
         plan.skipped_files.extend(skipped)
@@ -317,6 +392,7 @@ def index_path(
                 "plan": plan.to_dict(),
                 "embedding_changed": embedding_changed,
                 "indexing_options_changed": indexing_options_changed,
+                "store_snapshot_changed": store_snapshot_changed,
             }
 
         kept_docs: list[Document] = []
@@ -325,8 +401,8 @@ def index_path(
             options.incremental
             and not embedding_changed
             and not indexing_options_changed
-            and (output_path / "documents.jsonl").exists()
-            and (output_path / "embeddings.npy").exists()
+            and not store_snapshot_changed
+            and store_files_available
         ):
             existing = MemoryVectorStore.load(output_path, embedder)
             dirty_sources = set(plan.changed_files) | set(plan.deleted_files)
@@ -341,7 +417,9 @@ def index_path(
 
         new_docs: list[Document] = []
         for source in plan.changed_files:
-            file_path = Path(source)
+            file_path = _resolve_contained_candidate(Path(source), source_boundary)
+            if str(file_path) != source:
+                raise RuntimeError(f"Source changed during indexing: {source}")
             loaded = load_documents(
                 file_path,
                 recursive=False,
@@ -351,6 +429,18 @@ def index_path(
                 max_file_size_mb=options.max_file_size_mb,
             )
             chunks = chunk_documents(loaded, chunk_size=options.chunk_size, chunk_overlap=options.chunk_overlap)
+            # The planning hash and the bytes consumed by a loader must describe
+            # the same generation. Abort before committing anything if a source
+            # is edited concurrently; the next run can safely retry it.
+            try:
+                confirmed_path = _resolve_contained_candidate(file_path, source_boundary)
+                if confirmed_path != file_path:
+                    raise RuntimeError(f"Source changed during indexing: {file_path}")
+                _, indexed_sha256 = _stable_file_fingerprint(confirmed_path)
+            except OSError as exc:
+                raise RuntimeError(f"Source changed during indexing: {file_path}") from exc
+            if indexed_sha256 != current_entries[source].sha256:
+                raise RuntimeError(f"Source changed during indexing: {file_path}")
             new_docs.extend(chunks)
 
         store = MemoryVectorStore(embedder)
@@ -373,6 +463,7 @@ def index_path(
                 "updated_at_unix": time.time(),
                 "embedding_model": embedder.get_fingerprint(),
                 "incremental": options.incremental,
+                "vector_store_manifest_sha256": file_sha256(output_path / "manifest.json"),
                 _INDEXING_OPTIONS_METADATA_KEY: current_indexing_options,
             }
         )
@@ -398,6 +489,7 @@ def index_path(
             "plan": plan.to_dict(),
             "embedding_changed": embedding_changed,
             "indexing_options_changed": indexing_options_changed,
+            "store_snapshot_changed": store_snapshot_changed,
         }
 
 
@@ -416,22 +508,28 @@ def scan_indexable_files(
         raise FileNotFoundError(str(source))
     candidates = _candidate_files(source, recursive=recursive, include_pdf=include_pdf, include_docx=include_docx)
     root = source.parent if source.is_file() else source
+    resolved_root = root.resolve(strict=True)
     patterns = _combined_exclude_patterns(exclude_patterns)
     max_bytes = None if max_file_size_mb is None else int(max_file_size_mb * 1024 * 1024)
     entries: dict[str, IndexedFile] = {}
     skipped: list[str] = []
     for file_path in candidates:
-        resolved = str(file_path.resolve())
-        if _is_excluded(file_path, root, patterns) or _looks_binary(file_path):
+        resolved_path = _resolve_contained_candidate(file_path, resolved_root)
+        resolved = str(resolved_path)
+        if _is_excluded(file_path, root, patterns) or _looks_binary(resolved_path):
             skipped.append(resolved)
             continue
-        stat = file_path.stat()
+        stat = resolved_path.stat()
+        if max_bytes is not None and stat.st_size > max_bytes:
+            skipped.append(resolved)
+            continue
+        stat, digest = _stable_file_fingerprint(resolved_path)
         if max_bytes is not None and stat.st_size > max_bytes:
             skipped.append(resolved)
             continue
         entries[resolved] = IndexedFile(
             path=resolved,
-            sha256=file_sha256(file_path),
+            sha256=digest,
             size_bytes=int(stat.st_size),
             mtime=float(stat.st_mtime),
         )
@@ -462,12 +560,29 @@ def load_manifest(index_path: str | Path) -> IndexManifest:
     manifest_path = Path(index_path) / "index_manifest.json"
     if not manifest_path.exists():
         return IndexManifest()
-    return IndexManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return IndexManifest.from_dict(payload)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid index manifest: {manifest_path}") from exc
 
 
 def save_manifest(index_path: str | Path, manifest: IndexManifest) -> None:
-    Path(index_path).mkdir(parents=True, exist_ok=True)
-    (Path(index_path) / "index_manifest.json").write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    directory = Path(index_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / "index_manifest.json"
+    fd, temporary_name = tempfile.mkstemp(prefix=".index_manifest.", suffix=".tmp", dir=directory)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(manifest.to_dict(), file, ensure_ascii=False, indent=2, allow_nan=False)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(directory)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def inspect_index(index_path: str | Path) -> dict[str, Any]:
@@ -496,6 +611,30 @@ def file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _stable_file_fingerprint(path: Path, *, attempts: int = 3) -> tuple[os.stat_result, str]:
+    """Hash one stable on-disk generation or fail rather than index a torn read."""
+
+    for _ in range(attempts):
+        before = path.stat()
+        digest = file_sha256(path)
+        after = path.stat()
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if identity_before == identity_after:
+            return after, digest
+    raise RuntimeError(f"Source changed while hashing: {path}")
 
 
 def _candidate_files(path: Path, recursive: bool, include_pdf: bool, include_docx: bool) -> list[Path]:
@@ -542,26 +681,148 @@ def _index_lock(index_path: Path, *, enabled: bool, timeout: float = 10.0) -> It
     if not enabled:
         yield
         return
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("lock timeout must be a finite number >= 0")
+    timeout = float(timeout)
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("lock timeout must be a finite number >= 0")
     lock_path = index_path / ".index.lock"
-    deadline = time.time() + timeout
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows fallback
+        with _exclusive_create_lock(lock_path, timeout=timeout):
+            yield
+        return
+
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Index is locked: {lock_path}")
+                time.sleep(min(0.05, remaining))
+        os.ftruncate(fd, 0)
+        os.write(fd, json.dumps({"pid": os.getpid(), "acquired_at": time.time()}).encode("ascii"))
+        os.fsync(fd)
+        try:
+            yield
+        finally:
+            os.ftruncate(fd, 0)
+            os.write(fd, json.dumps({"released_at": time.time()}).encode("ascii"))
+            os.fsync(fd)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _exclusive_create_lock(lock_path: Path, *, timeout: float) -> Iterator[None]:
+    """Portable fallback for platforms without advisory ``flock`` support."""
+
+    deadline = time.monotonic() + timeout
     fd: int | None = None
     while fd is None:
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode("ascii"))
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, json.dumps({"pid": os.getpid(), "acquired_at": time.time()}).encode("ascii"))
+            os.fsync(fd)
         except FileExistsError:
-            if time.time() >= deadline:
+            if _remove_abandoned_lock(lock_path):
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError(f"Index is locked: {lock_path}")
-            time.sleep(0.05)
+            time.sleep(min(0.05, remaining))
     try:
         yield
     finally:
         if fd is not None:
             os.close(fd)
+        lock_path.unlink(missing_ok=True)
+
+
+def _remove_abandoned_lock(lock_path: Path, *, invalid_after_seconds: float = 300.0) -> bool:
+    """Best-effort stale owner recovery for the non-POSIX lock fallback."""
+
+    try:
+        stat = lock_path.stat()
+        payload = json.loads(lock_path.read_text(encoding="ascii"))
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        try:
+            age = max(0.0, time.time() - lock_path.stat().st_mtime)
+        except OSError:
+            return True
+        if age < invalid_after_seconds:
+            return False
         try:
             lock_path.unlink()
+            return True
         except FileNotFoundError:
-            pass
+            return True
+        except OSError:
+            return False
+    pid = payload.get("pid") if isinstance(payload, dict) else None
+    acquired_at = payload.get("acquired_at") if isinstance(payload, dict) else None
+    if isinstance(payload, dict) and "released_at" in payload:
+        try:
+            lock_path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+    if (
+        isinstance(pid, bool)
+        or not isinstance(pid, int)
+        or pid <= 0
+        or isinstance(acquired_at, bool)
+        or not isinstance(acquired_at, (int, float))
+        or not math.isfinite(float(acquired_at))
+    ):
+        age = max(0.0, time.time() - stat.st_mtime)
+        if age < invalid_after_seconds:
+            return False
+    elif _process_is_alive(pid):
+        return False
+    try:
+        lock_path.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        # Conservatively retain locks when liveness cannot be determined.
+        return True
+    return True
+
+
+def _fsync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(directory, flags)
+    except OSError:  # pragma: no cover - platform/filesystem-specific
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 __all__ = [

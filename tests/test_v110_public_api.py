@@ -23,7 +23,7 @@ class V110PublicAPITests(unittest.TestCase):
                 self.assertIsNotNone(getattr(cheragh, name))
 
     def test_version_matches_release(self):
-        self.assertEqual(cheragh.__version__, "1.3.0")
+        self.assertEqual(cheragh.__version__, "1.4.0")
 
 
 if __name__ == "__main__":

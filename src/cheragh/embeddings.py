@@ -120,13 +120,19 @@ class AzureOpenAIEmbedding(OpenAIEmbedding):
 class CohereEmbedding(EmbeddingModel):
     """Embedding model backed by Cohere Embed."""
 
-    def __init__(self, model: str = "embed-multilingual-v3.0", api_key: Optional[str] = None, client: Any | None = None):
+    def __init__(
+        self,
+        model: str = "embed-multilingual-v3.0",
+        api_key: Optional[str] = None,
+        client: Any | None = None,
+        **client_kwargs: Any,
+    ):
         if client is None:
             try:
                 import cohere
             except ImportError as exc:  # pragma: no cover - optional dependency
                 raise ImportError("CohereEmbedding requires: pip install cheragh[cohere]") from exc
-            client = cohere.Client(api_key)
+            client = cohere.Client(api_key, **client_kwargs)
         self.client = client
         self.model = model
 
@@ -149,13 +155,19 @@ class CohereEmbedding(EmbeddingModel):
 class VoyageEmbedding(EmbeddingModel):
     """Embedding model backed by Voyage AI."""
 
-    def __init__(self, model: str = "voyage-multilingual-2", api_key: Optional[str] = None, client: Any | None = None):
+    def __init__(
+        self,
+        model: str = "voyage-multilingual-2",
+        api_key: Optional[str] = None,
+        client: Any | None = None,
+        **client_kwargs: Any,
+    ):
         if client is None:
             try:
                 import voyageai
             except ImportError as exc:  # pragma: no cover - optional dependency
                 raise ImportError("VoyageEmbedding requires: pip install cheragh[voyage]") from exc
-            client = voyageai.Client(api_key=api_key)
+            client = voyageai.Client(api_key=api_key, **client_kwargs)
         self.client = client
         self.model = model
 
