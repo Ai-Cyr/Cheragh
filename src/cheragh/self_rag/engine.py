@@ -225,7 +225,11 @@ class LexicalEvidenceCritic:
         unsupported: list[str] = []
         for claim in claims:
             terms = _content_terms(claim)
-            score = _coverage(terms, evidence_terms)
+            # A claim without content terms cannot be verified against the
+            # evidence: score it 0.0 rather than letting the vacuous coverage
+            # of an empty term set inflate the overall support score while the
+            # claim is simultaneously reported as unsupported.
+            score = _coverage(terms, evidence_terms) if terms else 0.0
             claim_scores.append(score)
             if not terms or score < self.support_threshold:
                 unsupported.append(claim)

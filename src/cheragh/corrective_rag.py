@@ -102,6 +102,8 @@ class CorrectiveRAGRetriever(BaseRetriever):
         current_query = query
         all_correct: List[Document] = []
         all_ambiguous: List[Document] = []
+        correct_keys: set = set()
+        ambiguous_keys: set = set()
         attempts = 0
 
         while attempts <= self.max_retries:
@@ -114,12 +116,27 @@ class CorrectiveRAGRetriever(BaseRetriever):
                 # caller's indexed document immutable so later searches and
                 # caches cannot inherit a previous query's CRAG annotations.
                 doc = _snapshot_document(source_doc)
+                # Les tentatives successives re-rapportent souvent les mêmes
+                # documents ; sans clé de dédoublonnage (contenu quand
+                # l'identifiant manque), ils occuperaient plusieurs slots.
+                key = doc.doc_id if doc.doc_id is not None else ("content", doc.content)
+                if key in correct_keys:
+                    continue
                 label = self._evaluate(current_query, doc.content)
                 doc.metadata["crag_label"] = label.value
                 doc.metadata["evaluated_against_query"] = current_query
                 if label == DocQuality.CORRECT:
+                    correct_keys.add(key)
+                    if key in ambiguous_keys:
+                        ambiguous_keys.discard(key)
+                        all_ambiguous = [
+                            d
+                            for d in all_ambiguous
+                            if (d.doc_id if d.doc_id is not None else ("content", d.content)) != key
+                        ]
                     all_correct.append(doc)
-                elif label == DocQuality.AMBIGUOUS:
+                elif label == DocQuality.AMBIGUOUS and key not in ambiguous_keys:
+                    ambiguous_keys.add(key)
                     all_ambiguous.append(doc)
                 # incorrect → on jette
 
@@ -135,13 +152,10 @@ class CorrectiveRAGRetriever(BaseRetriever):
                 # (la nouvelle query sera utilisée au prochain tour)
 
         # 5) Construction du résultat final : correct d'abord, puis ambigus
+        # (les listes sont déjà dédoublonnées entre elles à l'accumulation)
         results = all_correct[:top_k]
         if self.include_ambiguous and len(results) < top_k:
-            remaining = top_k - len(results)
-            # Dédoublonner les ambigus déjà dans les correct
-            correct_ids = {d.doc_id for d in results if d.doc_id}
-            unique_ambiguous = [d for d in all_ambiguous if d.doc_id not in correct_ids]
-            results.extend(unique_ambiguous[:remaining])
+            results.extend(all_ambiguous[: top_k - len(results)])
 
         return results
 

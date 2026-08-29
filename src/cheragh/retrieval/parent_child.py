@@ -118,6 +118,7 @@ class ParentChildRetriever(BaseRetriever):
         Parent sections are detected with ``metadata['chunk_role'] ==
         'parent_section'`` and children with ``'child_chunk'``.
         """
+        chunks = list(chunks)
         parents: dict[str, Document] = {}
         children: list[Document] = []
         fallback_parents: dict[str, list[str]] = {}

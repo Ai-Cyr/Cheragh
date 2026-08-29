@@ -102,7 +102,16 @@ class CachedRetriever(BaseRetriever):
         self.cache = cache
         self.ttl = ttl
         self.namespace = namespace
-        self.fingerprint = str(fingerprint) if fingerprint is not None else _retriever_fingerprint(retriever)
+        self._explicit_fingerprint = str(fingerprint) if fingerprint is not None else None
+
+    @property
+    def fingerprint(self) -> str:
+        # Recomputed per lookup (unless pinned via ``fingerprint=...``) so that
+        # documents added to the wrapped store after construction change the
+        # cache key instead of serving stale results for the cache lifetime.
+        if self._explicit_fingerprint is not None:
+            return self._explicit_fingerprint
+        return _retriever_fingerprint(self.retriever)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         key = make_cache_key(
