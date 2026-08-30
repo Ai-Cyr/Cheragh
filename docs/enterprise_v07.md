@@ -42,7 +42,11 @@ print(rag.ask("Qui a le score le plus grand ?").answer)
 ```python
 from cheragh import AccessControlledRAGEngine, AccessPolicy, Principal
 
-guarded = AccessControlledRAGEngine(base_engine, policy=AccessPolicy(require_tenant_match=True))
+guarded = AccessControlledRAGEngine(
+    base_engine,
+    policy=AccessPolicy(require_tenant_match=True),
+    max_candidates=10_000,
+)
 response = guarded.ask(
     "Que dit le contrat ?",
     principal=Principal(user_id="u1", tenant_ids={"tenant-a"}, max_classification="internal"),
@@ -50,6 +54,7 @@ response = guarded.ask(
 ```
 
 Les documents sont filtrés via leurs métadonnées : `tenant_id`, `collection_id`, `classification`, `allowed_users`, `allowed_roles`, `denied_users`, `denied_roles`.
+Si la première fenêtre ne contient pas assez de documents autorisés, le retriever approfondit progressivement les résultats jusqu'à `max_candidates`. Les diagnostics `scanned_documents`, `denied_documents` et `candidate_limit_reached` sont disponibles dans `response.metadata["access_control"]`.
 
 ## Multi-tenancy
 
@@ -69,9 +74,11 @@ response = mt.ask("Résume le contrat", tenant_id="tenant-a", collection_id="con
 from cheragh import FeedbackLoop
 
 feedback = FeedbackLoop.from_jsonl("feedback.jsonl")
+response = engine.ask("Quelle est la clause de résiliation ?")
 feedback.log_feedback(
-    query="Quelle est la clause de résiliation ?",
+    query=response.query,
     rating="bad",
+    response=response,
     correct_answer="Préavis de 30 jours.",
     correct_source_ids=["contract-page-12"],
 )
@@ -79,3 +86,5 @@ feedback.log_feedback(
 print(feedback.summary().to_dict())
 feedback.export_evalset("evalset.jsonl", only_negative=True)
 ```
+
+Chaque réponse possède un `response_id` stable, identique à l'identifiant de trace lorsque le tracing est activé. L'export utilise la clé canonique `query` et peut être passé directement à `evaluate_retrieval`; les anciens jeux de données utilisant `question` restent acceptés.

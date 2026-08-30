@@ -1,6 +1,7 @@
 """Metadata-based access control for RAG documents and engines."""
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
@@ -151,18 +152,56 @@ class AccessControlledRetriever(BaseRetriever):
         principal: Principal | Mapping[str, Any] | None,
         policy: AccessPolicy | None = None,
         overfetch_factor: int = 4,
+        max_candidates: int = 10_000,
     ):
         self.retriever = retriever
         self.principal = _coerce_principal(principal)
         self.policy = policy or AccessPolicy()
-        self.overfetch_factor = max(1, overfetch_factor)
+        self.overfetch_factor = _validate_top_k(overfetch_factor, name="overfetch_factor")
+        self.max_candidates = _validate_top_k(max_candidates, name="max_candidates")
         self.last_denied_count = 0
+        self.last_scanned_count = 0
+        self.last_candidate_limit_reached = False
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         top_k = _validate_top_k(top_k)
-        docs = self.retriever.retrieve(query, top_k=top_k * self.overfetch_factor)
-        allowed = self.policy.filter_documents(docs, self.principal)
-        self.last_denied_count = max(0, len(docs) - len(allowed))
+        candidate_limit = min(
+            self.max_candidates,
+            max(top_k, top_k * self.overfetch_factor),
+        )
+        seen: set[tuple[int, str, str]] = set()
+        allowed: list[Document] = []
+        self.last_candidate_limit_reached = False
+
+        while True:
+            docs = list(self.retriever.retrieve(query, top_k=candidate_limit))
+            unseen: list[Document] = []
+            for rank, document in enumerate(docs):
+                key = (rank, str(document.doc_id or ""), document.content)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unseen.append(document)
+
+            allowed.extend(self.policy.filter_documents(unseen, self.principal))
+            if len(allowed) >= top_k:
+                break
+
+            # A short page means the ranked collection has been exhausted. A
+            # full page with no new ranked candidates means the wrapped
+            # retriever cannot expose a deeper prefix through its API.
+            if len(docs) < candidate_limit or not unseen:
+                break
+            if candidate_limit >= self.max_candidates:
+                self.last_candidate_limit_reached = True
+                break
+            candidate_limit = min(
+                self.max_candidates,
+                max(candidate_limit + 1, candidate_limit * 2),
+            )
+
+        self.last_scanned_count = len(seen)
+        self.last_denied_count = max(0, self.last_scanned_count - len(allowed))
         return allowed[:top_k]
 
 
@@ -175,33 +214,43 @@ class AccessControlledRAGEngine:
         policy: AccessPolicy | None = None,
         default_principal: Principal | Mapping[str, Any] | None = None,
         overfetch_factor: int = 4,
+        max_candidates: int = 10_000,
     ):
         self.base_engine = base_engine
         self.policy = policy or AccessPolicy()
         self.default_principal = _coerce_principal(default_principal)
-        self.overfetch_factor = overfetch_factor
+        self.overfetch_factor = _validate_top_k(overfetch_factor, name="overfetch_factor")
+        self.max_candidates = _validate_top_k(max_candidates, name="max_candidates")
 
     def for_principal(self, principal: Principal | Mapping[str, Any]) -> Any:
-        from ..engine import RAGEngine
         retriever = AccessControlledRetriever(
             self.base_engine.retriever,
             principal=principal,
             policy=self.policy,
             overfetch_factor=self.overfetch_factor,
+            max_candidates=self.max_candidates,
         )
-        return RAGEngine(
-            retriever=retriever,
-            llm_client=self.base_engine.llm_client,
-            answer_prompt=self.base_engine.answer_prompt,
-            top_k=self.base_engine.top_k,
-            strict_grounding=self.base_engine.strict_grounding,
-            min_score=self.base_engine.min_score,
-            require_citations=self.base_engine.require_citations,
-            flag_unsourced_sentences=self.base_engine.flag_unsourced_sentences,
-            compressor=self.base_engine.compressor,
-            query_transformer=self.base_engine.query_transformer,
-            trace_enabled=self.base_engine.trace_enabled,
-        )
+        ask_owner = getattr(getattr(self.base_engine, "ask", None), "__self__", None)
+        engine_template = self.base_engine
+        if (
+            ask_owner is not None
+            and ask_owner is not self.base_engine
+            and not isinstance(ask_owner, type)
+            and hasattr(ask_owner, "retriever")
+        ):
+            engine_template = ask_owner
+        # Rebuilding a RAGEngine from a subset of fields silently discarded
+        # context packing, cache settings and trace export configuration. A
+        # shallow request-local clone preserves the complete engine contract
+        # while replacing only the retrieval boundary that needs authorization.
+        # A transparent proxy may expose an ``ask`` method bound to its wrapped
+        # engine; clone that method owner so the replacement retriever is the one
+        # actually used by the request.
+        engine = copy(engine_template)
+        if engine is engine_template:
+            raise TypeError("base_engine must support request-local shallow copying")
+        engine.retriever = retriever
+        return engine
 
     def ask(self, query: str, principal: Principal | Mapping[str, Any] | None = None, **kwargs: Any) -> Any:
         if kwargs.get("top_k") is not None:
@@ -215,6 +264,12 @@ class AccessControlledRAGEngine:
                 "enabled": True,
                 "user_id": principal_obj.user_id,
                 "denied_documents": getattr(engine.retriever, "last_denied_count", 0),
+                "scanned_documents": getattr(engine.retriever, "last_scanned_count", 0),
+                "candidate_limit_reached": getattr(
+                    engine.retriever,
+                    "last_candidate_limit_reached",
+                    False,
+                ),
             }
         )
         return response

@@ -65,6 +65,8 @@ class V07EnterpriseTests(unittest.TestCase):
         response = mt.ask("contrat", tenant_id="tenant-a", collection_id="contracts", principal={"user_id": "u", "tenant_ids": ["tenant-a"]})
         self.assertEqual(response.metadata["tenant"]["tenant_id"], "tenant-a")
         self.assertEqual(response.sources[0].doc_id, "a1")
+        self.assertEqual(response.sources[0].metadata["collection_id"], "contracts")
+        self.assertEqual(response.sources[0].metadata["access_decision"], "allowed")
         self.assertEqual(mt.stats()["tenant_count"], 2)
 
     def test_feedback_loop_jsonl_and_eval_export(self):
@@ -87,6 +89,7 @@ class V07EnterpriseTests(unittest.TestCase):
             summary = loop.summary()
             self.assertEqual(summary.total, 1)
             dataset = loop.export_evalset(only_negative=True)
+            self.assertEqual(dataset[0]["query"], "Question")
             self.assertEqual(dataset[0]["expected_doc_ids"], ["doc-1"])
 
 

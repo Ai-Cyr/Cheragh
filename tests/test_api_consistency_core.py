@@ -87,6 +87,8 @@ class APICoreConsistencyTests(unittest.TestCase):
         streamed_payload = streamed.to_dict()
         direct_payload.pop("trace")
         streamed_payload.pop("trace")
+        direct_payload.pop("response_id")
+        streamed_payload.pop("response_id")
         self.assertEqual(streamed_payload, direct_payload)
         self.assertEqual(direct.grounded_score, 0.0)
         self.assertEqual(direct.metadata["top_k"], engine.top_k)
