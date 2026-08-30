@@ -130,6 +130,9 @@ class FeedbackLoop:
             answer = answer if answer is not None else getattr(response, "answer", None)
             if response_id is None:
                 response_id = getattr(response, "response_id", None) or getattr(response, "id", None)
+            if response_id is None:
+                trace = getattr(response, "trace", None)
+                response_id = getattr(trace, "request_id", None)
             retrieved = [getattr(src, "doc_id", None) for src in getattr(response, "sources", []) or []]
             retrieved = [str(item) for item in retrieved if item]
             resp_meta = getattr(response, "metadata", {}) or {}
@@ -185,11 +188,12 @@ class FeedbackLoop:
             records = [record for record in records if record.rating == "negative"]
         dataset = [
             {
-                "question": record.query,
+                "query": record.query,
                 "expected_answer": record.correct_answer or record.answer or "",
                 "expected_doc_ids": record.correct_source_ids,
                 "metadata": {
                     "feedback_id": record.feedback_id,
+                    "response_id": record.response_id,
                     "rating": record.rating,
                     "tenant_id": record.tenant_id,
                     "collection_id": record.collection_id,

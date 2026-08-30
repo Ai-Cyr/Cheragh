@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Protocol, Sequence, runtime_checkable
+from uuid import uuid4
 
 from .base import Document
 from .citations import CitationValidationResult, citation_location
@@ -95,9 +96,28 @@ class RAGResponse:
     unsourced_claims: list[str] = field(default_factory=list)
     citation_validation: CitationValidationResult | None = None
     trace: RAGTrace | None = None
+    response_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Assign one stable identifier that survives response serialization.
+
+        Traced responses reuse the trace request id so feedback, HTTP logs and
+        exported traces all refer to the same execution. Responses created
+        without tracing still receive an identifier instead of forcing callers
+        to invent one at the feedback boundary.
+        """
+
+        if self.response_id is None:
+            trace_request_id = self.trace.request_id if self.trace is not None else None
+            self.response_id = trace_request_id or uuid4().hex
+        elif not isinstance(self.response_id, str):
+            raise TypeError("response_id must be a str or None")
+        elif not self.response_id.strip():
+            raise ValueError("response_id must not be empty")
 
     def to_dict(self, *, include_prompt: bool = False) -> dict[str, Any]:
         data = {
+            "response_id": self.response_id,
             "query": self.query,
             "answer": self.answer,
             "sources": [source.to_dict() for source in self.sources],

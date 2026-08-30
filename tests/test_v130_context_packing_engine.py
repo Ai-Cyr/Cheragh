@@ -180,6 +180,8 @@ class ContextPackingEngineTests(unittest.TestCase):
         streamed_payload = streamed.to_dict()
         direct_payload.pop("trace")
         streamed_payload.pop("trace")
+        direct_payload.pop("response_id")
+        streamed_payload.pop("response_id")
         self.assertEqual(streamed_payload, direct_payload)
 
     def test_strict_grounding_treats_empty_rendered_context_as_no_context(self) -> None:

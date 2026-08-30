@@ -156,7 +156,12 @@ def _parse_example(example: RetrievalExample | dict) -> RetrievalExample:
     expected_set = set(str(doc_id) for doc_id in expected)
     for doc_id in expected_set:
         graded_relevance.setdefault(doc_id, 1.0)
-    return RetrievalExample(query=str(example["query"]), expected_doc_ids=expected_set, graded_relevance=graded_relevance)
+    query = example.get("query")
+    if query is None:
+        query = example.get("question")
+    if query is None:
+        raise KeyError("Evaluation examples must define 'query' (legacy alias: 'question')")
+    return RetrievalExample(query=str(query), expected_doc_ids=expected_set, graded_relevance=graded_relevance)
 
 
 def _candidate_ids(doc: Document) -> set[str]:

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add a stable `response_id` to every RAG response and carry it into feedback evaluation metadata.
+- Make feedback evaluation exports use the evaluator's canonical `query` field while continuing to accept legacy `question` datasets.
+- Deepen access-controlled retrieval progressively, up to a configurable candidate limit, so authorized evidence is not lost behind a fixed over-fetch window.
+- Preserve context packing, cache and tracing configuration when creating request-scoped access-controlled engines, including multi-tenant proxies.
+
 ## 1.4.0
 
 - Harden the FastAPI boundary with fail-closed authentication on public binds, strict request models, payload and `top_k` limits, admission control, bounded operations, safe request IDs and redacted errors.
