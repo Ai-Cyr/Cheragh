@@ -134,15 +134,18 @@ class SentenceWindowChunker:
             sentences = _split_sentences(doc.content)
             for idx, start in enumerate(range(0, len(sentences), step)):
                 chunk = " ".join(sentences[start : start + self.window_size]).strip()
-                if len(chunk) < self.min_chunk_size:
-                    continue
-                output.append(
-                    Document(
-                        content=chunk,
-                        metadata={**doc.metadata, "chunk_index": idx, "parent_doc_id": base_id, "sentence_start": start},
-                        doc_id=f"{base_id}#sentwin-{idx}",
+                if len(chunk) >= self.min_chunk_size:
+                    output.append(
+                        Document(
+                            content=chunk,
+                            metadata={**doc.metadata, "chunk_index": idx, "parent_doc_id": base_id, "sentence_start": start},
+                            doc_id=f"{base_id}#sentwin-{idx}",
+                        )
                     )
-                )
+                if start + self.window_size >= len(sentences):
+                    # The window already covered the last sentence; further
+                    # windows would only duplicate a suffix of this one.
+                    break
         return output
 
 

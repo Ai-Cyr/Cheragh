@@ -60,4 +60,8 @@ class TokenTextChunker:
             start = window[0].start()
             end = window[-1].end()
             chunks.append((text[start:end], start, end))
+            if i + self.chunk_size >= len(tokens):
+                # The window already reached the last token; a further step
+                # would only re-emit a suffix of this chunk.
+                break
         return chunks

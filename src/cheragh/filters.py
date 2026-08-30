@@ -29,7 +29,7 @@ def metadata_matches(metadata: Mapping[str, Any], filters: Mapping[str, Any] | N
             if not _matches_operators(actual, exists, expected):
                 return False
         elif isinstance(expected, (list, tuple, set, frozenset)):
-            if actual not in expected:
+            if actual not in tuple(expected):
                 return False
         elif actual != expected:
             return False
@@ -61,12 +61,12 @@ def _matches_operators(actual: Any, exists: bool, operators: Mapping[str, Any]) 
     return True
 
 
-def _as_membership_values(value: Any) -> set[Any]:
-    if isinstance(value, set):
-        return value
-    if isinstance(value, (list, tuple, frozenset)):
-        return set(value)
-    return {value}
+def _as_membership_values(value: Any) -> tuple[Any, ...]:
+    # Tuple membership compares with ``==`` and never hashes ``actual``, so
+    # unhashable metadata values (lists, dicts) do not raise ``TypeError``.
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(value)
+    return (value,)
 
 
 def _contains(actual: Any, expected: Any) -> bool:

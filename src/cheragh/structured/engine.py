@@ -231,20 +231,26 @@ class SQLRAGEngine:
             raise ValueError("empty SQL")
         if self.read_only and not re.match(r"^\s*(select|with)\b", cleaned, flags=re.I):
             raise ValueError("only SELECT/WITH statements are allowed")
+        # Scan a copy with string literals blanked out, so that words such as
+        # "update" or a ";" inside a quoted value neither reject legitimate
+        # SELECTs nor hide table references from the allowlist check.
+        scannable = _strip_string_literals(cleaned)
         forbidden = re.compile(
             r"\b(insert|update|delete|drop|alter|create|replace|attach|detach|pragma|vacuum)\b",
             re.I,
         )
-        if forbidden.search(cleaned):
+        if forbidden.search(scannable):
             raise ValueError("write or administrative SQL is not allowed")
-        if ";" in cleaned:
+        if ";" in scannable:
             raise ValueError("multiple SQL statements are not allowed")
         if self.table_allowlist:
-            referenced = _referenced_tables(cleaned)
-            unknown = [name for name in referenced if name not in self.table_allowlist]
+            allowed = {str(name).lower() for name in self.table_allowlist}
+            cte_names = _cte_names(scannable)
+            referenced = _referenced_tables(scannable)
+            unknown = [name for name in referenced if name.lower() not in allowed and name.lower() not in cte_names]
             if unknown:
                 raise ValueError(f"SQL references unavailable tables: {unknown}")
-        if not re.search(r"\blimit\b", cleaned, flags=re.I):
+        if not re.search(r"\blimit\b", scannable, flags=re.I):
             cleaned = f"{cleaned} LIMIT {self.max_rows}"
         return cleaned
 
@@ -593,11 +599,41 @@ def _extract_sql(text: str) -> str:
     return text.strip()
 
 
+def _strip_string_literals(sql: str) -> str:
+    """Blank out single-quoted SQL string literals (with '' escapes)."""
+
+    return re.sub(r"'(?:[^']|'')*'", "''", sql)
+
+
+def _cte_names(sql: str) -> set[str]:
+    """Names introduced by ``WITH name AS (...)`` clauses (lowercased)."""
+
+    return {
+        match.group(1).lower()
+        for match in re.finditer(r"(?:\bwith\s+(?:recursive\s+)?|,\s*)([A-Za-z_]\w*)\s+as\s*\(", sql, flags=re.I)
+    }
+
+
+_FROM_CLAUSE_END = re.compile(
+    r"\b(?:where|group|order|limit|having|window|union|intersect|except|join|on|using)\b|\(",
+    re.I,
+)
+
+
 def _referenced_tables(sql: str) -> list[str]:
     names: list[str] = []
-    pattern = r"\b(?:from|join)\s+(?:[\"`\[]?)([A-Za-z_][\w]*)"
-    for match in re.finditer(pattern, sql, flags=re.I):
+    for match in re.finditer(r"\bjoin\s+[\"`\[]?([A-Za-z_]\w*)", sql, flags=re.I):
         names.append(match.group(1))
+    # A FROM clause may list several comma-separated tables; capture the first
+    # identifier of every element, not just the first table of the clause.
+    for match in re.finditer(r"\bfrom\s+", sql, flags=re.I):
+        rest = sql[match.end() :]
+        stop = _FROM_CLAUSE_END.search(rest)
+        clause = rest[: stop.start()] if stop else rest
+        for part in clause.split(","):
+            ident = re.match(r"\s*[\"`\[]?([A-Za-z_]\w*)", part)
+            if ident:
+                names.append(ident.group(1))
     return names
 
 

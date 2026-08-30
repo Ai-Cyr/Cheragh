@@ -19,6 +19,7 @@ from ..base import (
     ExtractiveLLMClient,
     HashingEmbedding,
     LLMClient,
+    _snapshot_document,
     _validate_top_k,
 )
 from ..engine import RAGEngine, RAGResponse
@@ -105,9 +106,14 @@ class GraphRAGRetriever(BaseRetriever):
         graph_depth: int = 1,
         graph_boost: float = 0.15,
     ):
-        self.documents = {doc.doc_id or f"doc-{idx}": doc for idx, doc in enumerate(documents)}
-        for doc_id, doc in list(self.documents.items()):
-            doc.doc_id = doc.doc_id or doc_id
+        # Snapshot caller-owned documents instead of retaining (and mutating)
+        # them: assigning doc_id in place would leak into the caller's objects.
+        self.documents = {}
+        for idx, doc in enumerate(documents):
+            snapshot = _snapshot_document(doc)
+            doc_id = snapshot.doc_id or f"doc-{idx}"
+            snapshot.doc_id = doc_id
+            self.documents[doc_id] = snapshot
         self.graph = graph
         self.fallback_retriever = fallback_retriever
         self.graph_depth = graph_depth
@@ -169,6 +175,10 @@ class GraphRAGEngine:
         **engine_kwargs: Any,
     ):
         self.documents = [Document(doc.content, metadata=dict(doc.metadata), doc_id=doc.doc_id, score=doc.score) for doc in documents]
+        # Stamp stable ids on the engine-owned copies so graph doc_ids, the
+        # retriever's index and the fallback store all agree on identity.
+        for idx, doc in enumerate(self.documents):
+            doc.doc_id = doc.doc_id or f"doc-{idx}"
         self.embedding_model = embedding_model or HashingEmbedding()
         self.llm_client = llm_client or ExtractiveLLMClient()
         self.graph = graph or build_knowledge_graph(self.documents)
@@ -209,7 +219,6 @@ def build_knowledge_graph(documents: Iterable[Document]) -> KnowledgeGraph:
     graph = KnowledgeGraph()
     for idx, doc in enumerate(documents):
         doc_id = doc.doc_id or f"doc-{idx}"
-        doc.doc_id = doc_id
         for triple in extract_triples(doc.content, doc_id=doc_id, metadata=doc.metadata):
             graph.add_triple(triple)
         # Ensure entity-to-document mapping exists even without explicit triples.
@@ -234,13 +243,15 @@ def extract_triples(text: str, doc_id: str | None = None, metadata: dict[str, An
                 obj = _clean_entity(match.group("o"))
                 rel = _clean_relation(match.groupdict().get("rel") or default_relation)
                 if subject and obj and _norm_entity(subject) != _norm_entity(obj):
-                    triples.append(KnowledgeTriple(subject=subject, relation=rel, object=obj, doc_id=doc_id, metadata=meta))
+                    triples.append(KnowledgeTriple(subject=subject, relation=rel, object=obj, doc_id=doc_id, metadata=dict(meta)))
         entities = _extract_entities(sentence)
         if len(entities) >= 2:
             head = entities[0]
             for tail in entities[1:4]:
                 if _norm_entity(head) != _norm_entity(tail):
-                    triples.append(KnowledgeTriple(subject=head, relation="co-mention", object=tail, doc_id=doc_id, metadata=meta))
+                    # Each triple gets its own metadata dict; a shared instance
+                    # would let one triple's annotations leak into its siblings.
+                    triples.append(KnowledgeTriple(subject=head, relation="co-mention", object=tail, doc_id=doc_id, metadata=dict(meta)))
     # De-duplicate preserving order.
     deduped: list[KnowledgeTriple] = []
     seen: set[tuple[str, str, str, str | None]] = set()

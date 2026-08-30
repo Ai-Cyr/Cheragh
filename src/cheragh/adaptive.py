@@ -432,10 +432,16 @@ class AdaptiveRetriever(BaseRetriever):
     def _decide(self, query: str) -> GateDecision:
         prompt = GATE_PROMPT_FR.format(query=query)
         raw = self.llm_client.generate(prompt).strip().upper()
-        if "NO_RETRIEVE" in raw or "NO-RETRIEVE" in raw or raw.startswith("NO"):
+        # Labels explicites d'abord : un préfixe « Non, ... » ou « NOTE: » ne
+        # doit pas masquer un RETRIEVE explicite plus loin dans la réponse.
+        if "NO_RETRIEVE" in raw or "NO-RETRIEVE" in raw or "NO RETRIEVE" in raw:
             return GateDecision.NO_RETRIEVE
         if "REPHRASE" in raw:
             return GateDecision.REPHRASE
+        if "RETRIEVE" in raw:
+            return GateDecision.RETRIEVE
+        if raw.startswith("NO"):
+            return GateDecision.NO_RETRIEVE
         # Défaut prudent : retrieve (mieux vaut un appel en trop qu'un oubli)
         return GateDecision.RETRIEVE
 

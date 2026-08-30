@@ -84,7 +84,12 @@ class RecursiveTextChunker:
         if len(text) <= self.chunk_size:
             return [text]
         if not separators:
-            return [text[i : i + self.chunk_size] for i in range(0, len(text), self.chunk_size - self.chunk_overlap)]
+            windows: list[str] = []
+            for i in range(0, len(text), self.chunk_size - self.chunk_overlap):
+                windows.append(text[i : i + self.chunk_size])
+                if i + self.chunk_size >= len(text):
+                    break
+            return windows
 
         sep = separators[0]
         parts = text.split(sep)
@@ -110,8 +115,12 @@ class RecursiveTextChunker:
         for piece in pieces:
             piece_len = len(piece)
             if current and current_len + piece_len > self.chunk_size:
-                chunks.append("".join(current).strip())
-                overlap_text = _tail_text(chunks[-1], self.chunk_overlap)
+                joined = "".join(current)
+                chunks.append(joined.strip())
+                # Take the overlap from the unstripped text so the trailing
+                # separator survives; otherwise the next piece is glued to the
+                # overlap without punctuation and citation offsets cannot match.
+                overlap_text = _tail_text(joined, self.chunk_overlap)
                 current = [overlap_text] if overlap_text else []
                 current_len = len(overlap_text)
             current.append(piece)

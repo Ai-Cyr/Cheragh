@@ -125,7 +125,12 @@ class SemanticChunker:
     def _consecutive_distances(embeddings: np.ndarray) -> List[float]:
         if len(embeddings) < 2:
             return []
-        sims = (embeddings[:-1] * embeddings[1:]).sum(axis=1)
+        # Normalize rows so the dot product is a true cosine similarity even
+        # when the embedder does not return unit vectors.
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        unit = embeddings / norms
+        sims = (unit[:-1] * unit[1:]).sum(axis=1)
         return (1.0 - sims).tolist()
 
     @staticmethod

@@ -68,8 +68,16 @@ def evaluate_retrieval(
         precision = sum(binary_hits) / max(top_k, 1)
         covered_expected = _covered_expected_ids(docs, expected)
         recall = len(covered_expected) / len(expected) if expected else 1.0
-        ndcg = _ndcg(relevance_scores, example, top_k=top_k)
-        context_precision = _average_precision(binary_hits, relevant_total=min(len(expected), top_k) if expected else sum(binary_hits))
+        # Credit each expected label at most once (first occurrence) so that
+        # several chunks of one relevant parent cannot push rank-normalized
+        # metrics above 1.0.
+        credited_scores = _credited_relevance_scores(docs, example)
+        credited_hits = [score > 0 for score in credited_scores]
+        ndcg = _ndcg(credited_scores, example, top_k=top_k)
+        context_precision = _average_precision(
+            credited_hits,
+            relevant_total=min(len(expected), top_k) if expected else sum(credited_hits),
+        )
 
         reciprocal_ranks.append(rr)
         precisions.append(precision)
@@ -129,9 +137,14 @@ def context_precision_at_k(relevance_flags: Sequence[bool], k: int | None = None
 
 def _parse_example(example: RetrievalExample | dict) -> RetrievalExample:
     if isinstance(example, RetrievalExample):
-        if not example.graded_relevance:
-            example.graded_relevance.update({doc_id: 1.0 for doc_id in example.expected_doc_ids})
-        return example
+        if example.graded_relevance:
+            return example
+        # Copy instead of mutating the caller-owned example in place.
+        return RetrievalExample(
+            query=example.query,
+            expected_doc_ids=set(example.expected_doc_ids),
+            graded_relevance={doc_id: 1.0 for doc_id in example.expected_doc_ids},
+        )
     expected = example.get("expected_doc_ids", example.get("expected", []))
     if isinstance(expected, str):
         expected = [expected]
@@ -164,6 +177,26 @@ def _relevance(doc: Document, example: RetrievalExample) -> float:
     if example.graded_relevance:
         return max((example.graded_relevance.get(candidate, 0.0) for candidate in candidates), default=0.0)
     return 1.0 if candidates & example.expected_doc_ids else 0.0
+
+
+def _credited_relevance_scores(docs: Sequence[Document], example: RetrievalExample) -> list[float]:
+    """Per-document gains where each expected label is credited only once."""
+
+    graded = example.graded_relevance or {doc_id: 1.0 for doc_id in example.expected_doc_ids}
+    credited: set[str] = set()
+    scores: list[float] = []
+    for doc in docs:
+        best_label: str | None = None
+        best_gain = 0.0
+        for candidate in _candidate_ids(doc):
+            gain = graded.get(candidate, 0.0)
+            if candidate not in credited and gain > best_gain:
+                best_gain = gain
+                best_label = candidate
+        if best_label is not None:
+            credited.add(best_label)
+        scores.append(best_gain if best_label is not None else 0.0)
+    return scores
 
 
 def _covered_expected_ids(docs: Sequence[Document], expected: set[str]) -> set[str]:
