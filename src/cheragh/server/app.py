@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -78,12 +79,79 @@ class _OperationLease:
         self._release()
 
 
-class _ReleaseOperationLease:
-    def __init__(self, lease: _OperationLease):
+class _LeasedStream(Iterator[str]):
+    """Close abandoned streams without releasing a still-running worker's permit."""
+
+    def __init__(self, iterator: Iterator[str], lease: _OperationLease):
+        self._iterator = iterator
         self._lease = lease
+        self._context = contextvars.copy_context()
+        self._lock = threading.Lock()
+        self._running = False
+        self._closing = False
+        self._closed = False
+
+    def __iter__(self) -> _LeasedStream:
+        return self
+
+    def __next__(self) -> str:
+        with self._lock:
+            if self._closing or self._closed:
+                raise StopIteration
+            if self._running:
+                raise RuntimeError("stream is already being advanced")
+            self._running = True
+        try:
+            # Preserve one request context across next()/close(), even when
+            # Starlette schedules successive chunks on different workers.
+            return self._context.run(next, self._iterator)
+        except BaseException:
+            with self._lock:
+                self._closing = True
+            raise
+        finally:
+            with self._lock:
+                self._running = False
+                close_now = self._closing and not self._closed
+                if close_now:
+                    self._closed = True
+            if close_now:
+                self._close_iterator()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closing = True
+            if self._running or self._closed:
+                # The advancing worker owns cleanup until next() really exits.
+                return
+            self._closed = True
+        self._close_iterator()
+
+    def _close_iterator(self) -> None:
+        try:
+            close = getattr(self._iterator, "close", None)
+            if callable(close):
+                self._context.run(close)
+        except Exception as exc:
+            logger.error("stream_close_failed", extra={"error_type": type(exc).__name__})
+        finally:
+            # Closing a generator before its first next() does not execute its
+            # finally block, so the lease belongs to this wrapper instead.
+            self._lease.release()
+
+
+class _CloseStreamOperation:
+    def __init__(self, stream: _LeasedStream):
+        self._stream = stream
 
     async def __call__(self) -> None:
-        self._lease.release()
+        # Provider close() can block. Schedule it before awaiting so request
+        # cancellation cannot prevent cleanup from being submitted.
+        future = asyncio.get_running_loop().run_in_executor(
+            None, contextvars.copy_context().run, self._stream.close
+        )
+        future.add_done_callback(_consume_future_exception)
+        await asyncio.shield(future)
 
 
 class _OperationLimiter:
@@ -114,7 +182,9 @@ class _OperationLimiter:
                 self.release()
 
         try:
-            future = asyncio.get_running_loop().run_in_executor(None, guarded_operation)
+            future = asyncio.get_running_loop().run_in_executor(
+                None, contextvars.copy_context().run, guarded_operation
+            )
             # If the request times out, consume a later worker exception so
             # asyncio never prints provider messages to stderr as an
             # "exception was never retrieved" warning.
@@ -168,6 +238,8 @@ class _ProductionBoundaryMiddleware:
         response_complete = False
         status_code = 500
         received_bytes = 0
+        payload_too_large = False
+        response_replaced = False
 
         try:
             declared_length = _declared_content_length(scope)
@@ -181,16 +253,26 @@ class _ProductionBoundaryMiddleware:
             return
 
         async def limited_receive() -> dict[str, Any]:
-            nonlocal received_bytes
+            nonlocal received_bytes, payload_too_large
             message = await receive()
             if message.get("type") == "http.request":
                 received_bytes += len(message.get("body", b""))
                 if received_bytes > self.max_request_body_bytes:
+                    payload_too_large = True
                     raise _PayloadTooLargeError("request body limit exceeded")
             return message
 
         async def send_with_boundaries(message: dict[str, Any]) -> None:
-            nonlocal response_complete, response_started, status_code
+            nonlocal response_complete, response_started, response_replaced, status_code
+            if response_replaced:
+                return
+            if payload_too_large and not response_started:
+                # Framework body parsers may translate receive() failures into
+                # a generic 400. The boundary still owns the authoritative 413.
+                response_replaced = response_started = response_complete = True
+                status_code = 413
+                await _send_json_response(send, 413, "Request body too large", request_id)
+                return
             if message.get("type") == "http.response.start":
                 response_started = True
                 status_code = int(message.get("status", 500))
@@ -272,16 +354,6 @@ def create_app(
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError("The server requires FastAPI. Install with: pip install cheragh[fastapi]") from exc
 
-    if engine is None:
-        if config_path:
-            engine = RAGEngine.from_config(config_path)
-        elif index_path:
-            store = MemoryVectorStore.load(index_path, index_embedding_model)
-            engine = RAGEngine(store.as_retriever())
-        else:
-            raise ValueError("create_app requires engine, config_path or index_path")
-    if not callable(getattr(engine, "ask", None)) or not callable(getattr(engine, "stream", None)):
-        raise TypeError("engine must provide callable ask() and stream() methods")
     if readiness_check is not None and not callable(readiness_check):
         raise TypeError("readiness_check must be callable")
 
@@ -322,6 +394,20 @@ def create_app(
     stream_max_duration_seconds = _positive_float(stream_max_duration_seconds, "stream_max_duration_seconds")
     allow_prompt_exposure = _require_bool(allow_prompt_exposure, "allow_prompt_exposure")
 
+    # Fail invalid security and resource settings before opening indexes or
+    # initializing provider clients from a configuration file.
+    if engine is None:
+        if config_path:
+            engine = RAGEngine.from_config(config_path)
+        elif index_path:
+            store = MemoryVectorStore.load(index_path, index_embedding_model)
+            engine = RAGEngine(store.as_retriever())
+        else:
+            raise ValueError("create_app requires engine, config_path or index_path")
+    if not callable(getattr(engine, "ask", None)) or not callable(getattr(engine, "stream", None)):
+        raise TypeError("engine must provide callable ask() and stream() methods")
+    default_top_k = min(_validate_top_k(getattr(engine, "top_k", max_top_k)), max_top_k)
+
     operation_limiter = _OperationLimiter(max_concurrent_operations)
     app = FastAPI(title="cheragh", version=__version__)
     app.add_middleware(_ProductionBoundaryMiddleware, max_request_body_bytes=max_request_body_bytes)
@@ -336,6 +422,16 @@ def create_app(
             )
 
     AuthDependency = Depends(require_api_key)
+
+    class ManagedStreamingResponse(StreamingResponse):
+        async def __call__(self, scope, receive, send) -> None:
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                # StreamingResponse may skip its background callback when a
+                # send fails or its task is cancelled after client disconnect.
+                if self.background is not None:
+                    await self.background()
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -360,7 +456,7 @@ def create_app(
             raise HTTPException(status_code=403, detail="Prompt exposure is disabled")
         try:
             response = await operation_limiter.run(
-                lambda: engine.ask(request.query, top_k=request.top_k),
+                lambda: engine.ask(request.query, top_k=request.top_k or default_top_k),
                 timeout_seconds=request_timeout_seconds,
             )
         except _ServerBusyError as exc:
@@ -383,7 +479,7 @@ def create_app(
             iterator: Iterator[str] | None = None
             deadline = time.monotonic() + stream_max_duration_seconds
             try:
-                iterator = iter(engine.stream(request.query, top_k=request.top_k))
+                iterator = iter(engine.stream(request.query, top_k=request.top_k or default_top_k))
                 while time.monotonic() < deadline:
                     try:
                         chunk = next(iterator)
@@ -394,29 +490,24 @@ def create_app(
                         return
                     yield chunk
             finally:
-                try:
-                    if iterator is not None:
-                        close = getattr(iterator, "close", None)
-                        if callable(close):
-                            try:
-                                close()
-                            except Exception as exc:
-                                logger.error(
-                                    "stream_close_failed",
-                                    extra={"error_type": type(exc).__name__},
-                                )
-                finally:
-                    stream_lease.release()
+                if iterator is not None:
+                    close = getattr(iterator, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception as exc:
+                            logger.error("stream_close_failed", extra={"error_type": type(exc).__name__})
 
+        leased_stream = _LeasedStream(guarded_stream(), stream_lease)
         try:
-            return StreamingResponse(
-                guarded_stream(),
+            return ManagedStreamingResponse(
+                leased_stream,
                 media_type="text/plain",
                 headers={"X-Accel-Buffering": "no"},
-                background=_ReleaseOperationLease(stream_lease),
+                background=_CloseStreamOperation(leased_stream),
             )
         except BaseException:
-            stream_lease.release()
+            leased_stream.close()
             raise
 
     @app.post("/index", dependencies=[AuthDependency])

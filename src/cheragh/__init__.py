@@ -155,6 +155,17 @@ if TYPE_CHECKING:
     from .flare import LengthBasedDraftUncertainty as LengthBasedDraftUncertainty
     from .flare import TokenConfidence as TokenConfidence
     from .flare import TokenConfidenceUncertaintyEstimator as TokenConfidenceUncertaintyEstimator
+    from .generation import ConfidenceDraft as ConfidenceDraft
+    from .generation import GeneratedToken as GeneratedToken
+    from .self_rag import ReflectionTokenGroup as ReflectionTokenGroup
+    from .self_rag import ReflectionTokenDistribution as ReflectionTokenDistribution
+    from .self_rag import ReflectionScore as ReflectionScore
+    from .self_rag import ReflectionTokenScorer as ReflectionTokenScorer
+    from .self_rag import ReflectionTokenRetrievalGate as ReflectionTokenRetrievalGate
+    from .community_graph import GlobalMapReduceConfig as GlobalMapReduceConfig
+    from .community_graph import LeidenCommunityDetector as LeidenCommunityDetector
+    from .community_graph import LLMCommunitySummarizer as LLMCommunitySummarizer
+    from .community_graph import global_map_reduce as global_map_reduce
     from .graph import GraphRAGEngine as GraphRAGEngine
     from .graph import GraphRAGRetriever as GraphRAGRetriever
     from .graph import KnowledgeGraph as KnowledgeGraph
@@ -235,6 +246,8 @@ if TYPE_CHECKING:
     from .raptor_engine import RAPTORIndex as RAPTORIndex
     from .raptor_engine import RAPTORNode as RAPTORNode
     from .raptor_engine import RAPTORRetrieverV2 as RAPTORRetrieverV2
+    from .raptor_engine import RAPTORClusteringConfig as RAPTORClusteringConfig
+    from .raptor_engine import UMAPGMMClusterer as UMAPGMMClusterer
     from .reranking import BaseReranker as BaseReranker
     from .reranking import CohereReranker as CohereReranker
     from .reranking import CrossEncoderReranker as CrossEncoderReranker
@@ -315,6 +328,8 @@ if TYPE_CHECKING:
     from .training import HardNegativeMiner as HardNegativeMiner
     from .training import RAFTDatasetBuilder as RAFTDatasetBuilder
     from .training import RAFTTrainingRecord as RAFTTrainingRecord
+    from .training import RAFTGeneratedAnswer as RAFTGeneratedAnswer
+    from .training import TorchRetrievalTrainer as TorchRetrievalTrainer
     from .training import RetrievalTrainerProtocol as RetrievalTrainerProtocol
     from .training import RetrievalTrainingExample as RetrievalTrainingExample
     from .training import RetrievalTrainingPipeline as RetrievalTrainingPipeline
@@ -592,6 +607,8 @@ _LAZY_EXPORTS = {
     "RAPTORIndex": (".raptor_engine", "RAPTORIndex"),
     "RAPTORNode": (".raptor_engine", "RAPTORNode"),
     "RAPTORRetrieverV2": (".raptor_engine", "RAPTORRetrieverV2"),
+    "RAPTORClusteringConfig": (".raptor_engine", "RAPTORClusteringConfig"),
+    "UMAPGMMClusterer": (".raptor_engine", "UMAPGMMClusterer"),
     "FederatedRAGEngine": (".federated", "FederatedRAGEngine"),
     "FederatedRAGResult": (".federated", "FederatedRAGResult"),
     "FederatedRetriever": (".federated", "FederatedRetriever"),
@@ -626,6 +643,17 @@ _LAZY_EXPORTS = {
     "DraftUncertainty": (".flare", "DraftUncertainty"),
     "DraftUncertaintyEstimator": (".flare", "DraftUncertaintyEstimator"),
     "FLAREPipeline": (".flare", "FLAREPipeline"),
+    "ConfidenceDraft": (".generation", "ConfidenceDraft"),
+    "GeneratedToken": (".generation", "GeneratedToken"),
+    "ReflectionTokenGroup": (".self_rag", "ReflectionTokenGroup"),
+    "ReflectionTokenDistribution": (".self_rag", "ReflectionTokenDistribution"),
+    "ReflectionScore": (".self_rag", "ReflectionScore"),
+    "ReflectionTokenScorer": (".self_rag", "ReflectionTokenScorer"),
+    "ReflectionTokenRetrievalGate": (".self_rag", "ReflectionTokenRetrievalGate"),
+    "GlobalMapReduceConfig": (".community_graph", "GlobalMapReduceConfig"),
+    "LeidenCommunityDetector": (".community_graph", "LeidenCommunityDetector"),
+    "LLMCommunitySummarizer": (".community_graph", "LLMCommunitySummarizer"),
+    "global_map_reduce": (".community_graph", "global_map_reduce"),
     "LengthBasedDraftUncertainty": (".flare", "LengthBasedDraftUncertainty"),
     "TokenConfidence": (".flare", "TokenConfidence"),
     "TokenConfidenceUncertaintyEstimator": (".flare", "TokenConfidenceUncertaintyEstimator"),
@@ -647,6 +675,8 @@ _LAZY_EXPORTS = {
     "HardNegativeMiner": (".training", "HardNegativeMiner"),
     "RAFTDatasetBuilder": (".training", "RAFTDatasetBuilder"),
     "RAFTTrainingRecord": (".training", "RAFTTrainingRecord"),
+    "RAFTGeneratedAnswer": (".training", "RAFTGeneratedAnswer"),
+    "TorchRetrievalTrainer": (".training", "TorchRetrievalTrainer"),
     "RetrievalTrainerProtocol": (".training", "RetrievalTrainerProtocol"),
     "RetrievalTrainingExample": (".training", "RetrievalTrainingExample"),
     "RetrievalTrainingPipeline": (".training", "RetrievalTrainingPipeline"),

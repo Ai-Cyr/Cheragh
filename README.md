@@ -52,8 +52,9 @@ Les intégrations restent optionnelles :
 | `faiss`, `chroma`, `qdrant`, `redis` | stockage vectoriel et cache |
 | `learned-retrieval`, `multimodal`, `raptor`, `bm25` | techniques spécialisées légères ou intermédiaires |
 | `colpali` | modèle ColPali officiel et retrieval visuel multi-vecteur |
+| `graphrag`, `training` | Leiden hiérarchique et entraînement retrieval PyTorch, séparés car volumineux |
 | `fastapi` | serveur HTTP avec Uvicorn |
-| `all` | intégrations courantes, hors ColPali lourd et outils de développement |
+| `all` | intégrations courantes, hors ColPali, GraphRAG, entraînement PyTorch et outils de développement |
 
 Exemple :
 
@@ -218,17 +219,19 @@ cheragh techniques show self-rag
 Quelques limites importantes :
 
 - SPLADE, ColBERT et ColPali utilisent des calculs exacts en mémoire, sans index distribué ou ANN multivecteur compressé ;
-- Self-RAG couvre l'orchestration d'inférence, pas l'entraînement avec reflection tokens ;
-- RAPTOR propose désormais un parcours top-down borné, mais garde un clustering hard greedy et un summarizer injectable ; Community GraphRAG reste mono-niveau, sans Leiden hiérarchique ni map-reduce complet ;
-- FLARE accepte des signaux de confiance token-level, mais conserve un fallback par longueur pour les clients LLM texte-only ; Adaptive-RAG accepte un classifieur appris, tandis que son fallback local reste heuristique ;
-- le packing long-contexte borne exactement le rendu selon le tokenizer injecté, sans constituer à lui seul un long reader entraîné ;
+- Self-RAG couvre l'orchestration d'inférence et des scores de reflection tokens injectables, pas leur entraînement ni la recherche en faisceau par segments ;
+- RAPTOR propose UMAP/GMM global/local avec appartenances souples, un mode `paper_tree` et des budgets de contexte ; Community GraphRAG propose Leiden hiérarchique et une recherche globale map-reduce explicite ; les modèles et benchmarks restent à fournir ;
+- FLARE accepte les log-probabilités du brouillon via `OpenAIChatClient.generate_with_confidence` et masque les tokens incertains dans les requêtes ; le comportement historique reste disponible pour les clients texte seuls. Adaptive-RAG exige toujours un classifieur calibré pour remplacer son fallback heuristique ;
+- le packing long-contexte borne le rendu selon le tokenizer injecté, sans construire les unités longues ni le parcours long reader de LongRAG ;
 - l'évaluation claim-level exige un juge NLI/LLM injecté pour détecter sémantiquement paraphrases et contradictions ; le fallback lexical ne le prétend pas ;
 - Agentic RAG exécute une boucle bornée avec des outils explicitement enregistrés ;
 - Temporal RAG exige des métadonnées temporelles fiables et des scores initiaux comparables ;
-- le pipeline d'entraînement prépare le mining, la distillation et des données RAFT, mais ne fournit ni poids, ni optimiseur, ni entraînement distribué ;
+- le pipeline prépare le mining, la distillation et des données RAFT avec citations vérifiées ; le trainer PyTorch optionnel optimise réellement les encodeurs fournis, sans poids préentraînés ni entraînement distribué ;
 - le multimodal couvre le texte et les images locales, avec CLIP ou un encodeur ColPali optionnel.
 
 Les 44 entrées du catalogue ont ainsi une implémentation ou une baseline bornée et testée ; cela ne signifie pas que toutes les méthodes RAG publiées sont reproduites. Consultez [l'audit et les renforcements v1.3](docs/architectures_v130.md), puis [les architectures v1.2](docs/architectures_v120.md), pour les contrats détaillés.
+
+Les nouveaux modes sont documentés dans le [guide des mécanismes issus des publications](docs/research_methods.md). La [matrice des 44 techniques](docs/research_fidelity.md) détaille la fidélité aux articles et les validations restantes.
 
 ## Sécurité et production
 

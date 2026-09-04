@@ -42,7 +42,9 @@ rerank = ["sentence-transformers>=2.2,<6"]
 learned-retrieval = ["sentence-transformers>=5.0,<6"]
 multimodal = ["sentence-transformers>=2.2,<6", "Pillow>=10.0,<13"]
 colpali = ["colpali-engine>=0.3,<1", "Pillow>=10.0,<13"]
-raptor = ["scikit-learn>=1.0,<2"]
+raptor = ["scikit-learn>=1.0,<2", "umap-learn>=0.5,<0.6"]
+graphrag = ["graspologic>=3.4,<4"]
+training = ["torch>=2.2,<3"]
 bm25 = ["rank-bm25>=0.2.2,<1"]
 config = ["PyYAML>=6.0,<7", "pydantic>=2,<3"]
 pdf = ["pypdf>=4.0,<7"]
@@ -72,6 +74,7 @@ all = [
   "anthropic>=0.25,<1",
   "litellm>=1.0,<2",
   "scikit-learn>=1.0,<2",
+  "umap-learn>=0.5,<0.6",
   "rank-bm25>=0.2.2,<1",
   "PyYAML>=6.0,<7",
   "pydantic>=2,<3",
@@ -117,6 +120,7 @@ files = [
   "src/cheragh/corrective",
   "src/cheragh/evaluation/claims.py",
   "src/cheragh/flare.py",
+  "src/cheragh/generation.py",
   "src/cheragh/multihop",
   "src/cheragh/multimodal",
   "src/cheragh/raptor_engine",

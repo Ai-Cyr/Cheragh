@@ -22,6 +22,7 @@ from .base import (
     HashingEmbedding,
     LLMClient,
     OpenAILLMClient,
+    _close_stream,
     _snapshot_document,
     _validate_top_k,
 )
@@ -704,8 +705,10 @@ class RAGEngine:
             trace.prompt = prompt
         step = trace.start_step("generation", prompt_chars=len(prompt), streaming=True) if trace else None
         chunks: list[str] = []
+        provider_stream = None
         try:
-            for chunk in self.llm_client.stream(prompt, **generate_kwargs):
+            provider_stream = self.llm_client.stream(prompt, **generate_kwargs)
+            for chunk in provider_stream:
                 if not isinstance(chunk, str):
                     raise TypeError("llm_client.stream() must yield only str chunks")
                 chunks.append(chunk)
@@ -738,6 +741,10 @@ class RAGEngine:
                 )
                 self._finalize_trace(trace, answer=partial_answer, prompt=prompt)
             raise
+
+        finally:
+            if provider_stream is not None:
+                _close_stream(provider_stream)
 
         answer = "".join(chunks)
         if step:
