@@ -20,6 +20,13 @@ from .engine import (
     StaticRetrievalGate,
     SupportAssessment,
 )
+from .reflection import (
+    ReflectionScore,
+    ReflectionTokenDistribution,
+    ReflectionTokenGroup,
+    ReflectionTokenRetrievalGate,
+    ReflectionTokenScorer,
+)
 
 __all__ = [
     "AlwaysRetrieveGate",
@@ -36,4 +43,9 @@ __all__ = [
     "SelfRAGTrace",
     "StaticRetrievalGate",
     "SupportAssessment",
+    "ReflectionScore",
+    "ReflectionTokenDistribution",
+    "ReflectionTokenGroup",
+    "ReflectionTokenRetrievalGate",
+    "ReflectionTokenScorer",
 ]

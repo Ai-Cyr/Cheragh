@@ -11,10 +11,40 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
+import logging
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy as np
+
+
+logger = logging.getLogger(__name__)
+
+
+def _close_stream(stream: Any) -> None:
+    """Close a provider stream without masking an active error or its answer."""
+
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception as exc:
+            logger.error("provider_stream_close_failed", extra={"error_type": type(exc).__name__})
+
+
+def _iter_chat_completion_text(stream: Any) -> Iterator[str]:
+    """Consume Chat Completions text, including streams with usage-only events."""
+
+    try:
+        for event in stream:
+            # include_usage emits a final chunk with an empty choices array.
+            if not event.choices:
+                continue
+            chunk = event.choices[0].delta.content
+            if chunk:
+                yield chunk
+    finally:
+        _close_stream(stream)
 
 
 def _numpy():
@@ -237,10 +267,7 @@ class OpenAILLMClient(LLMClient):
             stream=True,
             **kwargs,
         )
-        for event in stream:  # pragma: no cover - provider integration
-            chunk = event.choices[0].delta.content
-            if chunk:
-                yield chunk
+        yield from _iter_chat_completion_text(stream)
 
 
 class StaticLLMClient(LLMClient):

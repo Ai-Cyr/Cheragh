@@ -4,6 +4,27 @@ Ce guide décrit une base d'exploitation pour Cheragh 1.4.0. Le projet reste en
 bêta : validez chaque combinaison de fournisseur, modèle, vector store et corpus
 avec vos propres jeux d'évaluation avant de traiter du trafic réel.
 
+## Migration du cache Redis et des flux fournisseurs
+
+Le format des clés Redis encode désormais séparément le préfixe, le namespace
+et la clé : `cheragh:v2:<prefix_base64>:<namespace_base64>:<key_base64>`.
+Cela supprime les collisions liées aux deux-points et empêche l'invalidation
+d'un namespace de supprimer celui d'un autre. La mise à jour démarre avec un
+cache froid : prévoir temporairement davantage d'appels aux fournisseurs.
+
+Les anciennes clés ne sont ni lues, ni migrées, ni supprimées automatiquement.
+Leurs TTL expirent normalement. Les clés sans TTL restent présentes : prévoir
+un nettoyage explicitement vérifié après l'arrêt des anciens workers. Les
+statistiques du nouveau cache comptent uniquement les clés v2. Un retour à
+l'ancienne version réutilise son ancien format; éviter de mélanger des workers
+de versions différentes lorsqu'une invalidation cohérente est nécessaire.
+
+Les flux OpenAI, Azure et LiteLLM ferment maintenant explicitement leur
+transport, y compris à l'abandon du consommateur. Le serveur conserve le
+contexte de requête et la réservation de capacité jusqu'à la fin d'un appel
+en cours. Cela ne permet pas d'interrompre de force un fournisseur bloqué :
+configurer aussi ses timeouts réseau.
+
 ## Responsabilités de la plateforme
 
 Cheragh fournit un moteur RAG, une CLI et une API FastAPI. Il ne remplace pas :

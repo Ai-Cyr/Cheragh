@@ -136,7 +136,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "Pack scored evidence under a strict token budget with source quotas and boundary-aware ordering.",
         references=("https://arxiv.org/abs/2406.15319",),
         limitations=(
-            "Context-engineering component, not LongRAG's trained long reader; exact limits require the target model tokenizer.",
+            "Context packing only; LongRAG's grouped long units and long-reader workflow are separate. Exact limits require the target tokenizer.",
         ),
     ),
     _spec("chain-of-note", "Chain-of-Note", TechniqueFamily.AUGMENTATION, TechniqueStatus.EXPERIMENTAL, "cheragh.ChainOfNoteRetriever", "Generate evidence notes before final synthesis."),
@@ -211,7 +211,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "Build summary trees and retrieve through collapsed or budgeted top-down beam traversal.",
         references=("https://arxiv.org/abs/2401.18059",),
         limitations=(
-            "Hard greedy clustering and injectable summaries; no UMAP/GMM soft clustering or trained summarizer is bundled.",
+            "Optional UMAP/GMM soft clustering and paper_tree traversal; semantic embeddings, an abstractive summarizer and benchmark validation are caller responsibilities.",
         ),
     ),
     _spec(
@@ -281,7 +281,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "cheragh.CommunityGraphRAGEngine",
         "Detect communities, build reports and support global or local graph-grounded search.",
         references=("https://arxiv.org/abs/2404.16130",),
-        limitations=("Deterministic single-level baseline; no Leiden hierarchy or full LLM map-reduce pipeline.",),
+        limitations=("Optional hierarchical Leiden and bounded global map-reduce; graph extraction, report quality and benchmark validation remain application responsibilities.",),
     ),
     _spec(
         "colpali",
@@ -315,7 +315,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
             "https://arxiv.org/abs/2403.10131",
             "https://arxiv.org/abs/2407.02485",
         ),
-        limitations=("Framework-neutral data/orchestration layer; no model weights, optimizer or distributed trainer is bundled.",),
+        limitations=("Grounded RAFT data and optional Torch contrastive/KL training; callers supply encoders and optimizers. No pretrained weights, LLM SFT runner or distributed training.",),
     ),
 )
 

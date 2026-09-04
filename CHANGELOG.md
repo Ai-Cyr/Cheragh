@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add optional RAPTOR global/local UMAP–GMM soft clustering, bounded summary inputs and cosine-based `paper_tree` traversal.
+- Add hierarchical Leiden community detection and budgeted GraphRAG global map-reduce with source authorization and citation checks.
+- Connect FLARE to aligned generation-time token log probabilities and mask uncertain tokens from retrieval queries.
+- Add grounded RAFT supervision with verified quote spans, reproducible document shuffling and fixed-size oracle dropout contexts.
+- Add optional real PyTorch retrieval optimization and strict Self-RAG reflection probability scoring boundaries.
+- Preserve request context and stream cleanup under cancellation; enforce omitted `top_k` and chunked request limits before provider work.
+- Close OpenAI/Azure/LiteLLM transports explicitly and accept usage-only streaming events.
+- Encode Redis prefix/namespace/key boundaries independently; the new v2 key format starts cold and leaves legacy keys untouched (see the production migration guide).
+- Audit all 44 technique entries against their documented scope and retain explicit research and deployment qualification limits.
+
 - Add a stable `response_id` to every RAG response and carry it into feedback evaluation metadata.
 - Make feedback evaluation exports use the evaluator's canonical `query` field while continuing to accept legacy `question` datasets.
 - Deepen access-controlled retrieval progressively, up to a configurable candidate limit, so authorized evidence is not lost behind a fixed over-fetch window.
