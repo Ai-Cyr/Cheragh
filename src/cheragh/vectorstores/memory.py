@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -568,13 +569,13 @@ def _store_file_lock(
                 yield
             return
         if exclusive:
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fd = _open_store_lock(lock_path, os.O_CREAT | os.O_RDWR)
         else:
             try:
-                fd = os.open(lock_path, os.O_RDONLY)
+                fd = _open_store_lock(lock_path, os.O_RDONLY)
             except FileNotFoundError:
                 try:
-                    fd = os.open(lock_path, os.O_CREAT | os.O_RDONLY, 0o600)
+                    fd = _open_store_lock(lock_path, os.O_CREAT | os.O_RDONLY)
                 except PermissionError:  # Read-only legacy index; no writer can race.
                     yield
                     return
@@ -591,6 +592,9 @@ def _store_file_lock(
                         raise TimeoutError(f"Vector store is locked: {lock_path}")
                     time.sleep(min(0.05, remaining))
             try:
+                # A path can be replaced while this process waits for flock.
+                # Never truncate a descriptor that is no longer its lock file.
+                _validate_store_lock(fd, lock_path)
                 if exclusive:
                     os.ftruncate(fd, 0)
                     os.write(fd, f"pid={os.getpid()}\n".encode("ascii"))
@@ -600,6 +604,52 @@ def _store_file_lock(
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def _open_store_lock(path: Path, flags: int) -> int:
+    # NONBLOCK prevents a substituted FIFO from hanging a read-only load.
+    # Without O_NOFOLLOW, fstat/lstat still rejects a followed link before
+    # flock or any write; opening itself deliberately never uses O_TRUNC.
+    safe_flags = flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    for attempt in range(3):
+        opening_flags = safe_flags
+        try:
+            current = path.lstat()
+        except FileNotFoundError:
+            # Even without O_NOFOLLOW, exclusive creation cannot follow a
+            # symlink inserted between lstat() and open().
+            if flags & os.O_CREAT:
+                opening_flags |= os.O_EXCL
+        else:
+            if not stat.S_ISREG(current.st_mode):
+                raise ValueError("Vector store lock must be a regular file, without symlinks")
+            # Never create an outside target if a regular file is exchanged
+            # for a dangling symlink on a platform without O_NOFOLLOW.
+            opening_flags &= ~os.O_CREAT
+        try:
+            fd = os.open(path, opening_flags, 0o600)
+            break
+        except FileExistsError:
+            if not opening_flags & os.O_EXCL or attempt == 2:
+                raise
+            # Another cooperating process created the lock first.
+    try:
+        _validate_store_lock(fd, path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _validate_store_lock(fd: int, path: Path) -> None:
+    opened = os.fstat(fd)
+    current = path.lstat()
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise ValueError("Vector store lock must be the same regular file, without symlinks")
 
 
 @contextmanager

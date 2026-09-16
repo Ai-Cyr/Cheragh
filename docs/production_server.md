@@ -18,8 +18,10 @@ cheragh serve --config rag.yaml --host 0.0.0.0
 `CHERAGH_REQUIRE_AUTH=true` also makes application startup fail when no usable
 key is configured. `/health` and `/ready` remain unauthenticated so an
 orchestrator can probe the process without receiving corpus or engine data.
-An injected `readiness_check` must be fast and non-blocking; use it to inspect
-already-maintained dependency state, not to issue a fresh provider request.
+An injected `readiness_check` must be synchronous, fast and non-blocking, and
+return a boolean. Async/generator callbacks are rejected at startup; other
+non-boolean results fail readiness with `503`. Inspect already-maintained
+dependency state rather than issuing a fresh provider request.
 
 Protected routes use `X-API-Key`. Comparisons are constant-time, failures do
 not distinguish missing and incorrect keys, and prompts are not returned by
@@ -35,7 +37,7 @@ default. Programmatic deployments must explicitly set
 | `max_request_body_bytes` | 1 MiB | Rejects declared and streamed oversize bodies with `413`. |
 | `max_concurrent_operations` | 16 | Shared bound for ask, stream, index and stats work; saturation returns `503`. |
 | `max_server_connections` | 128 | Uvicorn ceiling; must exceed the operation bound so health probes retain headroom. |
-| `request_timeout_seconds` | 60 s | Returns `504` when a synchronous ask or stats call exceeds the deadline. |
+| `request_timeout_seconds` | 60 s | Returns `504` when an ask (including response conversion) or stats call exceeds the deadline. |
 | `index_timeout_seconds` | 900 s | Returns `504` when indexing exceeds the deadline. |
 | `stream_max_duration_seconds` | 300 s | Stops a stream between chunks after its deadline. |
 | `max_top_k` | 50 | Rejects larger retrieval requests with `422`. |

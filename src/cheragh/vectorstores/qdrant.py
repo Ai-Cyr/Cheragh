@@ -7,10 +7,9 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 from uuid import uuid4
 
-import numpy as np
-
 from ..base import BaseRetriever, Document, EmbeddingModel, _validate_top_k
 from ..filters import metadata_matches
+from ._validation import embedding_matrix, query_vector
 
 
 def require_qdrant_client():
@@ -38,11 +37,14 @@ class QdrantVectorStore:
         client=None,
         distance: str = "Cosine",
     ):
-        QdrantClient, models = require_qdrant_client() if client is None else (None, None)
+        models = None
+        if client is None:
+            QdrantClient, models = require_qdrant_client()
+            client = QdrantClient(path=str(path) if path else None, url=url, api_key=api_key)
         self.embedding_model = embedding_model
         self.collection_name = collection_name
         self.distance = distance
-        self.client = client or QdrantClient(path=str(path) if path else None, url=url, api_key=api_key)
+        self.client = client
         self._models = models
 
     def add_documents(self, documents: Iterable[Document]) -> None:
@@ -51,12 +53,13 @@ class QdrantVectorStore:
         docs = list(documents)
         if not docs:
             return
-        vectors = np.asarray(self.embedding_model.embed_documents([doc.content for doc in docs]), dtype=np.float32)
-        if vectors.ndim != 2:
-            raise ValueError("Embeddings must be a 2D array")
+        vectors = embedding_matrix(
+            self.embedding_model.embed_documents([doc.content for doc in docs]), rows=len(docs),
+        )
         self._ensure_collection(vectors.shape[1], models)
         points = []
         for doc, vector in zip(docs, vectors):
+            point_id: str | int
             if not doc.doc_id:
                 # A fresh UUID prevents anonymous documents from successive
                 # ``add_documents`` calls from reusing the old ``doc-0`` ID.
@@ -86,7 +89,7 @@ class QdrantVectorStore:
         """
 
         top_k = _validate_top_k(top_k)
-        query_vec = self.embedding_model.embed_query(query).tolist()
+        query_vec = query_vector(self.embedding_model.embed_query(query)).tolist()
         if not filters:
             return self._search(query_vec, top_k)
 
@@ -116,13 +119,16 @@ class QdrantVectorStore:
         return []  # pragma: no cover - the final limit always reaches ``total``
 
     def _search(self, query_vector: list[float], limit: int, *, query_filter=None) -> list[Document]:
-        hits = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_vector,
-            limit=limit,
-            query_filter=query_filter,
-            with_payload=True,
+        kwargs = dict(
+            collection_name=self.collection_name, limit=limit,
+            query_filter=query_filter, with_payload=True,
         )
+        if callable(getattr(self.client, "query_points", None)):
+            hits = self.client.query_points(query=query_vector, **kwargs).points
+        else:
+            # qdrant-client 1.9 predates the unified Query API. New releases
+            # removed search(), so prefer query_points when it is available.
+            hits = self.client.search(query_vector=query_vector, **kwargs)
         output: list[Document] = []
         for hit in hits:
             payload = dict(hit.payload or {})
@@ -133,6 +139,16 @@ class QdrantVectorStore:
 
     def as_retriever(self, filters: Optional[dict] = None) -> "QdrantRetriever":
         return QdrantRetriever(self, filters=filters)
+
+    def close(self) -> None:
+        """Close the client, releasing local storage locks or HTTP resources."""
+        self.client.close()
+
+    def __enter__(self) -> "QdrantVectorStore":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     def _ensure_collection(self, size: int, models) -> None:
         existing = [collection.name for collection in self.client.get_collections().collections]
@@ -214,7 +230,12 @@ def _to_qdrant_filter(filters: Mapping[str, Any], models) -> Any:
 def _qdrant_membership_values(value: Any) -> Optional[list[str | int | bool]]:
     values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
     candidates = list(values)
-    if not candidates or not all(_is_qdrant_scalar(candidate) for candidate in candidates):
+    # MatchAny only accepts a homogeneous integer or string list, not booleans
+    # or mixed types. Those remain exact via the canonical local predicate.
+    if not candidates or not (
+        all(isinstance(candidate, str) for candidate in candidates)
+        or all(type(candidate) is int for candidate in candidates)
+    ):
         return None
     return candidates
 

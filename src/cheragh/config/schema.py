@@ -11,7 +11,9 @@ except ImportError as exc:  # pragma: no cover - dependency guard
 
 
 class StrictBaseModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+    # Validation exceptions are routinely written to CLI/startup logs. A model
+    # validator can otherwise include the entire input mapping with API keys.
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True, hide_input_in_errors=True)
 
 
 _RETRIEVER_TYPES = {"bm25", "hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}

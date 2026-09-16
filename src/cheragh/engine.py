@@ -1266,7 +1266,7 @@ def _llm_from_config(config: dict[str, Any]) -> LLMClient:
         from .llms import AnthropicClient
 
         return AnthropicClient(
-            model=str(config.get("model", "claude-3-5-sonnet-latest")),
+            model=str(config.get("model", "claude-sonnet-4-6")),
             api_key=config.get("api_key"),
             timeout=timeout_seconds,
             max_retries=max_retries,
