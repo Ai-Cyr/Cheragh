@@ -4,6 +4,90 @@ Ce guide décrit une base d'exploitation pour Cheragh 1.4.0. Le projet reste en
 bêta : validez chaque combinaison de fournisseur, modèle, vector store et corpus
 avec vos propres jeux d'évaluation avant de traiter du trafic réel.
 
+## Profils vérifiés et migration des intégrations
+
+Le noyau et le serveur sont testés sous Python 3.10 à 3.13. La CI vérifie aussi
+les vrais SDK FAISS, Chroma et Qdrant avec stockage local, ainsi que la
+sérialisation des requêtes Anthropic avec un transport HTTP simulé. Ces contrôles
+n'exigent ni clé de fournisseur ni service distant. Le fonctionnement d'un
+cluster Qdrant distant et les réponses des fournisseurs restent à valider
+dans l'environnement de déploiement. Chroma est exclu de la qualification
+de production pour les raisons ci-dessous.
+
+### Restriction de sécurité Chroma
+
+Au 16 septembre 2026, `chromadb` 1.5.9 est affecté par des avis sans version
+corrigée publiée : injections de code critiques dans les opérations serveur de
+collection ([GHSA-f4j7-r4q5-qw2c](https://github.com/advisories/GHSA-f4j7-r4q5-qw2c),
+[GHSA-36p7-vc44-83pf](https://github.com/advisories/GHSA-36p7-vc44-83pf)) et défauts
+d'autorisation entre tenants ([GHSA-xph7-9rjv-w5fr](https://github.com/advisories/GHSA-xph7-9rjv-w5fr),
+[GHSA-2wm9-hf6c-p5cr](https://github.com/advisories/GHSA-2wm9-hf6c-p5cr)).
+
+Le profil serveur Cheragh `fastapi,config` n'installe pas Chroma. L'extra `all`
+ne l'installe plus non plus. `cheragh[chroma]` reste un choix explicite pour
+l'intégration locale ; sa CI utilise `PersistentClient` embarqué et des vecteurs
+calculés par Cheragh, sans serveur Chroma ni code distant. Ce test de
+compatibilité ne lève pas les avis. Le [signalement amont](https://github.com/chroma-core/chroma/issues/6717)
+décrit aussi le chargement de code par le SDK client depuis une configuration
+de collection empoisonnée. L'extra Chroma entier reste hors qualification de
+production avant correctif amont et nouvel audit. Aucune exclusion de ces
+vulnérabilités n'est ajoutée à `pip-audit`.
+
+Les écritures de l'adaptateur conservent maintenant un instantané complet des
+métadonnées dans `__cheragh_metadata_v2`, pour qu'une mise à jour ne réutilise
+pas d'anciens champs tenant/ACL. Les champs plats servent uniquement au
+préfiltrage ; la vérification finale passe par l'adaptateur. Les anciennes
+entrées restent lisibles, mais tous les lecteurs doivent être mis à jour avant
+les nouvelles écritures : ne mélangez pas les anciennes versions ou des lecteurs
+bruts de collection avec ce format.
+
+### Contraintes des modèles et diagnostics
+
+L'extra `graphrag` nécessite Python 3.10 à 3.12 : `graspologic` 3.4.x ne
+propose pas de version compatible avec Python 3.13. Utilisez un environnement
+Python 3.12 pour ce profil ; le noyau n'a pas cette restriction.
+
+Le modèle Anthropic par défaut devient `claude-sonnet-4-6`, en remplacement de
+la famille Sonnet 3.5 retirée. Un `generation.model` explicite reste prioritaire.
+Revalidez les réponses et le budget de tokens lors de cette migration ; consultez
+le [calendrier officiel](https://platform.claude.com/docs/en/about-claude/model-deprecations).
+La borne du SDK reste `<1`, la migration de son API majeure étant distincte de
+ce changement de modèle.
+
+Les erreurs de validation textuelles n'affichent plus les valeurs d'entrée
+contenant des secrets. `validate-config --json` masque également les URL avec
+identifiants ou paramètres d'authentification. Le masquage concerne l'affichage :
+la configuration utilisée pour la connexion reste intacte.
+
+Un `readiness_check` doit être une fonction synchrone, rapide et non bloquante
+qui renvoie un vrai booléen. Les fonctions async et les générateurs sont refusés
+à la création du serveur ; un résultat non booléen donne HTTP 503. La conversion
+de la réponse `/ask` reste maintenant dans le même délai et quota que la génération.
+
+### Sauvegardes FAISS
+
+`FaissVectorStore.save()` publie désormais un manifeste de schéma 2 qui référence
+`index.<sha256>.faiss` et `documents.<sha256>.jsonl`. Les fichiers sont écrits et
+synchronisés avant le remplacement atomique de `manifest.json`. Un échec avant
+ce remplacement conserve la dernière génération publiée. Le chargement vérifie
+les tailles et empreintes avant la désérialisation native de l'index.
+
+Les sauvegardes de schéma 1 restent lisibles et passent au schéma 2 au prochain
+`save()`. Les anciennes versions de Cheragh ne lisent pas le schéma 2 : gardez
+une copie de l'ancienne sauvegarde avant migration si un rollback est nécessaire.
+Sauvegardez le dossier complet. Les générations précédentes ne sont pas purgées
+automatiquement ; surveillez l'espace disque et ne retirez les fichiers devenus
+inutiles qu'après arrêt des lecteurs et sauvegarde vérifiée. Les empreintes
+détectent la corruption, elles ne rendent pas sûr un index provenant d'une
+source non fiable.
+
+Les fichiers et verrous de sauvegarde sont privés (`0600`) : lecteurs et
+écrivains doivent utiliser le même utilisateur de service. Un `chmod` ponctuel
+sur une génération ne constitue pas une politique de partage pour les suivantes.
+
+Utilisez `with QdrantVectorStore(...)` ou appelez `close()` à l'arrêt afin de
+libérer les connexions et verrous locaux du client Qdrant.
+
 ## Migration du cache Redis et des flux fournisseurs
 
 Le format des clés Redis encode désormais séparément le préfixe, le namespace
@@ -24,6 +108,13 @@ partagé ne réutilise pas les documents autorisés d'un autre utilisateur.
 Les résultats soumis à une politique personnalisée ou opaque ne sont pas mis
 en cache lorsque son état d'autorisation ne peut pas être représenté de façon
 fiable. Cette précaution s'applique aussi si un fingerprint explicite est fourni.
+
+Les identités de documents conservent désormais le type des métadonnées
+(par exemple `1.0` et `"1.0"` produisent des clés distinctes). Les composants
+opaques sans fingerprint explicite sont isolés par instance et processus,
+y compris après fork ou réutilisation d'une adresse mémoire. Leurs entrées
+ne sont donc pas réutilisées après redémarrage ; un partage explicite exige
+un fingerprint qui décrit réellement la source, le compte et sa configuration.
 
 Les anciennes clés ne sont ni lues, ni migrées, ni supprimées automatiquement.
 Leurs TTL expirent normalement. Les clés sans TTL restent présentes : prévoir
@@ -94,6 +185,11 @@ informations de version et de provenance du build. Après téléchargement,
 exécutez `sha256sum --check SHA256SUMS` dans le dossier des artefacts et vérifiez
 que tous les jobs du run retenu sont verts. Une PR peut produire des artefacts :
 seuls ceux du commit de release approuvé doivent être publiés.
+
+`BUILD_INFO.json` accompagne les artefacts CI avec le commit réellement construit,
+le lien du run, la version Python et les tailles/empreintes des distributions.
+Le succès du job de packaging ne suffit pas : vérifiez aussi les autres jobs
+du même run avant de promouvoir ces fichiers.
 
 La source distribution contient aussi les tests, scripts de vérification,
 workflows, Dockerfile et guides nécessaires pour reproduire ces contrôles sans

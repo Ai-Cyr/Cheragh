@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Keep HTTP response conversion inside request deadlines and capacity limits; reject invalid readiness callbacks before reporting healthy.
+- Hide credential-bearing validation inputs and URLs in configuration diagnostics.
+- Restore current Qdrant query compatibility and Chroma documents without metadata; replace Chroma metadata snapshots completely and validate vector batches before index mutation.
+- Publish checksummed FAISS snapshots atomically while retaining legacy reads, and preserve typed document identities in retrieval/reranking caches.
+- Reject unsafe vector-store lock files before writes, and isolate opaque cache instances across object reuse and worker processes.
+- Replace the retired Anthropic default with `claude-sonnet-4-6`; exercise provider request serialization and local vector SDKs in CI.
+- Record source revision, workflow run and distribution hashes alongside validated package artifacts.
+- Exclude Chroma from the `all` extra while its server has unpatched critical advisories; retain the explicit local compatibility extra and document the deployment restriction.
+
 - Support Sentence Transformers 6 alongside 5, with CPU integration tests for local embeddings, reranking, token embeddings and CLIP.
 - Encode CLIP text and image batches separately and restore document order, supporting versions that reject mixed-modality batches.
 

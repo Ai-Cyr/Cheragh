@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import sys
+from urllib.parse import parse_qsl, urlsplit
 
 from ..base import HashingEmbedding, OpenAILLMClient, ExtractiveLLMClient
 from ..engine import RAGEngine
@@ -456,20 +457,37 @@ def _redact_config_secrets(value):
     if isinstance(value, dict):
         output = {}
         for key, item in value.items():
-            normalized = str(key).casefold()
-            sensitive = (
-                normalized in _SENSITIVE_CONFIG_KEYS
-                or normalized.endswith("_api_key")
-                or normalized.endswith("_password")
-                or normalized.endswith("_private_key")
-                or normalized.endswith("_secret")
-                or normalized.endswith("_token")
-            )
-            output[key] = "***" if sensitive else _redact_config_secrets(item)
+            output[key] = "***" if _is_sensitive_config_key(key) else _redact_config_secrets(item)
         return output
     if isinstance(value, list):
         return [_redact_config_secrets(item) for item in value]
+    if isinstance(value, str):
+        # Credentials can also live in provider URLs, outside api_key fields.
+        # Redact the whole URL; rebuilding it risks retaining encoded secrets.
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            return "***" if "://" in value else value
+        if parts.netloc and (
+            parts.username is not None
+            or any(_is_sensitive_config_key(key) for key, _ in parse_qsl(parts.query, keep_blank_values=True))
+        ):
+            return "***"
     return value
+
+
+def _is_sensitive_config_key(key) -> bool:
+    normalized = str(key).casefold().replace("-", "_")
+    return (
+        normalized in _SENSITIVE_CONFIG_KEYS
+        or normalized in {
+            "key", "secret", "auth", "signature", "sig", "apikey", "clientsecret",
+            "accesskey", "accesskeyid", "accesstoken", "privatekey", "secretkey",
+        }
+        or normalized.endswith((
+            "_api_key", "_password", "_private_key", "_secret", "_token", "_signature", "_credential",
+        ))
+    )
 
 
 def _cmd_techniques(args: argparse.Namespace) -> int:

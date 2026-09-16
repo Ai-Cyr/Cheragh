@@ -5,12 +5,64 @@ from collections.abc import Mapping, Sequence as SequenceABC
 import functools
 import hashlib
 import json
+import os
 from pathlib import Path
+import threading
 from typing import Any, Callable, Sequence
+from uuid import uuid4
+import weakref
 
 from ..base import BaseRetriever, Document, EmbeddingModel, LLMClient, _snapshot_documents
 from ..reranking import BaseReranker
 from .base import CacheBackend, make_cache_key
+
+
+_INSTANCE_PID = os.getpid()
+_INSTANCE_LOCK = threading.RLock()
+_INSTANCE_TOKENS: dict[int, tuple[weakref.ReferenceType[Any], str]] = {}
+
+
+def _reset_instance_registry() -> None:
+    global _INSTANCE_PID, _INSTANCE_LOCK, _INSTANCE_TOKENS
+    _INSTANCE_LOCK = threading.RLock()
+    _INSTANCE_TOKENS = {}
+    _INSTANCE_PID = os.getpid()
+
+
+if hasattr(os, "register_at_fork"):
+    # Weakref callbacks may run in the child before the first cache lookup.
+    # They must not acquire a lock inherited from another parent's thread.
+    os.register_at_fork(after_in_child=_reset_instance_registry)
+
+
+def _instance_token(value: Any) -> str:
+    """Isolate opaque instances across GC, processes and forked workers."""
+    pid = os.getpid()
+    if pid != _INSTANCE_PID:
+        # A fork inherits object addresses, registry tokens and potentially a
+        # lock owned by a vanished thread. Reset before acquiring that lock.
+        _reset_instance_registry()
+    identity = id(value)
+    with _INSTANCE_LOCK:
+        existing = _INSTANCE_TOKENS.get(identity)
+        if existing is not None and existing[0]() is value:
+            return existing[1]
+        token = uuid4().hex
+
+        def discard(reference):
+            with _INSTANCE_LOCK:
+                current = _INSTANCE_TOKENS.get(identity)
+                if current is not None and current[0] is reference:
+                    _INSTANCE_TOKENS.pop(identity, None)
+
+        try:
+            reference = weakref.ref(value, discard)
+        except TypeError:
+            # No safe identity registry is possible without retaining the
+            # object. Prefer misses for non-weak-referenceable custom values.
+            return token
+        _INSTANCE_TOKENS[identity] = (reference, token)
+        return token
 
 
 def cached_call(
@@ -47,9 +99,13 @@ class CachedEmbeddingModel(EmbeddingModel):
         self.cache = cache
         self.ttl = ttl
         self.namespace = namespace
-        self.cache_fingerprint = (
-            str(fingerprint) if fingerprint is not None else _component_fingerprint(model, purpose="embedder")
-        )
+        self._explicit_fingerprint = str(fingerprint) if fingerprint is not None else None
+
+    @property
+    def cache_fingerprint(self) -> str:
+        if self._explicit_fingerprint is not None:
+            return self._explicit_fingerprint
+        return _component_fingerprint(self.model, purpose="embedder")
 
     def embed_query(self, text: str):
         key = make_cache_key("query", self.cache_fingerprint, text)
@@ -184,9 +240,13 @@ class CachedReranker(BaseReranker):
         self.cache = cache
         self.ttl = ttl
         self.namespace = namespace
-        self.fingerprint = (
-            str(fingerprint) if fingerprint is not None else _component_fingerprint(reranker, purpose="reranker")
-        )
+        self._explicit_fingerprint = str(fingerprint) if fingerprint is not None else None
+
+    @property
+    def fingerprint(self) -> str:
+        if self._explicit_fingerprint is not None:
+            return self._explicit_fingerprint
+        return _component_fingerprint(self.reranker, purpose="reranker")
 
     def rerank(self, query: str, documents: Sequence[Document], top_k: int = 5) -> list[Document]:
         doc_fingerprint, complete = _documents_fingerprint(documents)
@@ -217,9 +277,13 @@ class CachedLLMClient(LLMClient):
         self.cache = cache
         self.ttl = ttl
         self.namespace = namespace
-        self.fingerprint = (
-            str(fingerprint) if fingerprint is not None else _component_fingerprint(client, purpose="llm")
-        )
+        self._explicit_fingerprint = str(fingerprint) if fingerprint is not None else None
+
+    @property
+    def fingerprint(self) -> str:
+        if self._explicit_fingerprint is not None:
+            return self._explicit_fingerprint
+        return _component_fingerprint(self.client, purpose="llm")
 
     def generate(self, prompt: str, **kwargs: Any) -> str:
         key = make_cache_key(self.client.__class__.__name__, self.fingerprint, prompt, kwargs)
@@ -263,7 +327,7 @@ def _retriever_fingerprint(retriever: BaseRetriever) -> str:
 def _retriever_snapshot(retriever: Any, *, seen: set[int]) -> str:
     object_id = id(retriever)
     if object_id in seen:
-        return make_cache_key("retriever-cycle", _class_name(retriever), object_id)
+        return make_cache_key("retriever-cycle", _class_name(retriever), _instance_token(retriever))
     seen.add(object_id)
 
     custom = getattr(retriever, "get_fingerprint", None)
@@ -344,7 +408,7 @@ def _retriever_snapshot(retriever: Any, *, seen: set[int]) -> str:
         snapshot["reranker"] = _component_fingerprint(reranker, purpose="reranker")
 
     if not stable_source or not complete or not _is_package_component(retriever):
-        snapshot["instance"] = object_id
+        snapshot["instance"] = _instance_token(retriever)
     return make_cache_key("retriever", snapshot)
 
 
@@ -356,7 +420,7 @@ def _authorization_snapshot(value: Any, *, seen: set[int]) -> tuple[Any, bool]:
         return make_cache_key(value), complete
     identity = id(value)
     if identity in seen:
-        return {"class": _class_name(value), "instance": identity}, False
+        return {"class": _class_name(value), "instance": _instance_token(value)}, False
     seen.add(identity)
     snapshot: dict[str, Any] = {"class": _class_name(value)}
     complete = True
@@ -374,7 +438,7 @@ def _authorization_snapshot(value: Any, *, seen: set[int]) -> tuple[Any, bool]:
     if type(value) not in {AccessPolicy, Principal}:
         # Even empty custom policy state may read an external ACL or closure.
         # An instance discriminator cannot make such a decision cacheable.
-        snapshot["instance"] = identity
+        snapshot["instance"] = _instance_token(value)
         complete = False
     return snapshot, complete
 
@@ -434,7 +498,7 @@ def _component_fingerprint(component: Any, *, purpose: str) -> str:
             # name. Without an explicit wrapper fingerprint, isolate opaque
             # client instances rather than risking cross-provider cache hits.
             if getattr(component, "client", None) is not None:
-                declared["instance"] = id(component)
+                declared["instance"] = _instance_token(component)
             return make_cache_key(purpose, declared)
 
     snapshot: dict[str, Any] = {"class": _class_name(component)}
@@ -461,7 +525,7 @@ def _component_fingerprint(component: Any, *, purpose: str) -> str:
         or not _is_package_component(component)
         or getattr(component, "client", None) is not None
     ):
-        snapshot["instance"] = id(component)
+        snapshot["instance"] = _instance_token(component)
     return make_cache_key(purpose, snapshot)
 
 
@@ -473,15 +537,17 @@ def _documents_fingerprint(documents: SequenceABC[Any]) -> tuple[str, bool]:
             complete = False
             digest.update(_class_name(document).encode("utf-8"))
             continue
-        metadata, metadata_complete = _safe_snapshot(document.metadata)
+        _, metadata_complete = _safe_snapshot(document.metadata)
         complete = complete and metadata_complete
         payload = {
             "doc_id": document.doc_id,
             "content": document.content,
-            "metadata": metadata,
+            "metadata": document.metadata,
             "score": document.score,
         }
-        digest.update(_stable_json(payload).encode("utf-8"))
+        # Preserve types in metadata values and keys. The readable snapshot
+        # conflates e.g. 1.0 with "1.0", and lists with tuples.
+        digest.update(make_cache_key(payload).encode("ascii"))
         digest.update(b"\x1e")
     return digest.hexdigest(), complete
 
@@ -494,7 +560,7 @@ def _selected_attributes(component: Any, names: Sequence[str]) -> tuple[dict[str
             continue
         value = getattr(component, name)
         snapshot, value_complete = _safe_snapshot(value)
-        output[name] = snapshot
+        output[name] = make_cache_key(value) if value_complete else snapshot
         complete = complete and value_complete
     return output, complete
 
@@ -517,13 +583,13 @@ def _safe_snapshot(value: Any) -> tuple[Any, bool]:
             complete = complete and item_complete
         return output, complete
     if isinstance(value, (list, tuple)):
-        output = []
+        sequence_output = []
         complete = True
         for raw_item in value:
             item, item_complete = _safe_snapshot(raw_item)
-            output.append(item)
+            sequence_output.append(item)
             complete = complete and item_complete
-        return output, complete
+        return sequence_output, complete
     if isinstance(value, (set, frozenset)):
         items = [_safe_snapshot(item) for item in value]
         return sorted((item for item, _ in items), key=_stable_json), all(complete for _, complete in items)

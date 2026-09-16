@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -354,8 +355,20 @@ def create_app(
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError("The server requires FastAPI. Install with: pip install cheragh[fastapi]") from exc
 
-    if readiness_check is not None and not callable(readiness_check):
-        raise TypeError("readiness_check must be callable")
+    if readiness_check is not None:
+        if not callable(readiness_check):
+            raise TypeError("readiness_check must be callable")
+        # The readiness contract is a fast synchronous boolean check. Async
+        # callables and generators otherwise return truthy objects without
+        # executing the check, falsely reporting a healthy deployment.
+        targets = (readiness_check, getattr(readiness_check, "__call__", None))
+        if any(
+            inspect.iscoroutinefunction(target)
+            or inspect.isasyncgenfunction(target)
+            or inspect.isgeneratorfunction(target)
+            for target in targets
+        ):
+            raise TypeError("readiness_check must be a synchronous callable returning bool")
 
     indexing_enabled = (
         _as_bool(os.getenv("CHERAGH_ENABLE_INDEXING"), default=False)
@@ -441,6 +454,13 @@ def create_app(
     async def ready():
         try:
             is_ready = readiness_check() if readiness_check is not None else engine is not None
+            if not isinstance(is_ready, bool):
+                # A sync wrapper can still accidentally return a coroutine.
+                # Close it without running user code or emitting an unawaited
+                # coroutine warning, then fail readiness closed.
+                if inspect.iscoroutine(is_ready):
+                    is_ready.close()
+                raise TypeError("readiness_check must return bool")
         except Exception as exc:
             logger.error("readiness_check_failed", extra={"error_type": type(exc).__name__})
             is_ready = False
@@ -455,15 +475,19 @@ def create_app(
         if request.include_prompt and not allow_prompt_exposure:
             raise HTTPException(status_code=403, detail="Prompt exposure is disabled")
         try:
-            response = await operation_limiter.run(
-                lambda: engine.ask(request.query, top_k=request.top_k or default_top_k),
+            return await operation_limiter.run(
+                # Response conversion is synchronous extension code as well;
+                # keep it off the event loop and inside the same deadline and
+                # capacity permit as generation.
+                lambda: engine.ask(request.query, top_k=request.top_k or default_top_k).to_dict(
+                    include_prompt=request.include_prompt,
+                ),
                 timeout_seconds=request_timeout_seconds,
             )
         except _ServerBusyError as exc:
             raise HTTPException(status_code=503, detail="Server is busy", headers={"Retry-After": "1"}) from exc
         except _OperationTimeoutError as exc:
             raise HTTPException(status_code=504, detail="Request timed out") from exc
-        return response.to_dict(include_prompt=request.include_prompt)
 
     @app.post("/stream", dependencies=[AuthDependency])
     async def stream(request: AskRequest):

@@ -49,13 +49,15 @@ Les intégrations restent optionnelles :
 | `local`, `rerank` | embeddings Sentence Transformers et reranking local |
 | `openai`, `cohere`, `voyage`, `anthropic`, `litellm` | fournisseurs d'embeddings ou de génération |
 | `pdf`, `docx`, `config` | chargeurs documentaires et YAML |
-| `faiss`, `chroma`, `qdrant`, `redis` | stockage vectoriel et cache |
-| `learned-retrieval`, `multimodal`, `raptor`, `graphrag` | retrieval appris, images et backends de clustering |
+| `faiss`, `qdrant`, `redis` | stockage vectoriel et cache |
+| `chroma` | intégration locale explicite, exclue de la qualification de production ; voir le [guide](docs/production.md#restriction-de-sécurité-chroma) |
+| `learned-retrieval`, `multimodal`, `raptor` | retrieval appris, images et backends de clustering |
 | `research`, `self-rag`, `evaluation-semantic`, `training-generative` | adaptateurs Transformers, juges et entraînement ; PyTorch adapté au matériel |
 | `colpali` | modèle ColPali officiel et retrieval visuel multi-vecteur |
-| `graphrag`, `training` | Leiden hiérarchique et entraînement retrieval PyTorch, séparés car volumineux |
+| `graphrag` | Leiden hiérarchique ; Python 3.10 à 3.12 requis par `graspologic` |
+| `training` | entraînement retrieval PyTorch, séparé car volumineux |
 | `fastapi` | serveur HTTP avec Uvicorn |
-| `all` | intégrations courantes, hors ColPali, GraphRAG, entraînement PyTorch et outils de développement |
+| `all` | intégrations courantes, hors Chroma, ColPali, GraphRAG, entraînement PyTorch et outils de développement |
 
 Exemple :
 

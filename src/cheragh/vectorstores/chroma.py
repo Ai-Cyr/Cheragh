@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from ..base import BaseRetriever, Document, EmbeddingModel, _validate_top_k
 from ..filters import metadata_matches
+from ._validation import embedding_matrix, query_vector
 
 
 def require_chromadb():
@@ -34,10 +35,10 @@ class ChromaVectorStore:
         path: str | Path | None = None,
         client=None,
     ):
-        chromadb = require_chromadb() if client is None else None
         self.embedding_model = embedding_model
         self.collection_name = collection_name
         if client is None:
+            chromadb = require_chromadb()
             client = chromadb.PersistentClient(path=str(path)) if path else chromadb.Client()
         self.client = client
         self.collection = client.get_or_create_collection(collection_name)
@@ -50,7 +51,9 @@ class ChromaVectorStore:
         # documents need globally unique IDs: restarting ``enumerate`` for every
         # call used to overwrite ``doc-0``, ``doc-1``, ... from earlier batches.
         ids = [str(doc.doc_id) if doc.doc_id else f"auto-{uuid4().hex}" for doc in docs]
-        embeddings = self.embedding_model.embed_documents([doc.content for doc in docs]).tolist()
+        embeddings = embedding_matrix(
+            self.embedding_model.embed_documents([doc.content for doc in docs]), rows=len(docs),
+        ).tolist()
         metadatas = [_safe_metadata(doc.metadata) for doc in docs]
         self.collection.upsert(ids=ids, documents=[doc.content for doc in docs], metadatas=metadatas, embeddings=embeddings)
 
@@ -64,7 +67,7 @@ class ChromaVectorStore:
         """
 
         top_k = _validate_top_k(top_k)
-        embedding = self.embedding_model.embed_query(query).tolist()
+        embedding = query_vector(self.embedding_model.embed_query(query)).tolist()
         if not filters:
             return self._query(embedding, top_k)
 
@@ -133,7 +136,7 @@ class ChromaRetriever(BaseRetriever):
 
 
 def _safe_metadata(metadata: dict) -> dict:
-    safe = {}
+    safe: dict[str, Any] = {}
     for key, value in metadata.items():
         if isinstance(value, str):
             safe[key] = _escape_metadata_string(value)
@@ -141,11 +144,20 @@ def _safe_metadata(metadata: dict) -> dict:
             safe[key] = value
         else:
             safe[key] = _encode_metadata_value(value)
-    return safe
+    # Chroma merges upsert metadata, so omitted ACL/provenance keys otherwise
+    # survive a replacement. Keep a complete authoritative snapshot alongside
+    # flat fields used only for conservative native prefiltering.
+    envelope = _METADATA_ENVELOPE_PREFIX + json.dumps(safe, ensure_ascii=False, sort_keys=True)
+    return {**safe, _METADATA_ENVELOPE_KEY: envelope}
 
 
 _JSON_METADATA_PREFIX = "\x1echeragh-json-v1:"
 _STRING_METADATA_PREFIX = "\x1echeragh-string-v1:"
+_METADATA_ENVELOPE_KEY = "__cheragh_metadata_v2"
+# Every older adapter escaped literal strings starting with STRING_PREFIX.
+# This prefix therefore cannot be confused with legacy user metadata, even
+# when a user chose the reserved key or wrote an envelope-looking string.
+_METADATA_ENVELOPE_PREFIX = _STRING_METADATA_PREFIX + "document-v2:"
 
 
 def _escape_metadata_string(value: str) -> str:
@@ -168,6 +180,15 @@ def _encode_metadata_value(value: object) -> str:
 
 
 def _restore_metadata(metadata: dict) -> dict:
+    envelope = metadata.get(_METADATA_ENVELOPE_KEY)
+    if isinstance(envelope, str) and envelope.startswith(_METADATA_ENVELOPE_PREFIX):
+        try:
+            snapshot = json.loads(envelope[len(_METADATA_ENVELOPE_PREFIX):])
+        except json.JSONDecodeError as exc:
+            raise ValueError("Invalid Chroma metadata snapshot") from exc
+        if not isinstance(snapshot, dict):
+            raise ValueError("Invalid Chroma metadata snapshot: expected an object")
+        metadata = snapshot
     restored = {}
     for key, value in metadata.items():
         if isinstance(value, str) and value.startswith(_STRING_METADATA_PREFIX):
@@ -200,6 +221,9 @@ def _to_chroma_filter(filters: Mapping[str, Any]) -> Optional[dict]:
 
     conditions: list[dict] = []
     for key, expected in filters.items():
+        if key == _METADATA_ENVELOPE_KEY:
+            # The real user value is inside the envelope, not this flat field.
+            continue
         if isinstance(expected, Mapping):
             for operator, value in expected.items():
                 condition = _chroma_operator_condition(key, operator, value)
@@ -209,7 +233,8 @@ def _to_chroma_filter(filters: Mapping[str, Any]) -> Optional[dict]:
             values = _chroma_membership_values(expected)
             if values is not None:
                 conditions.append({key: {"$in": values}})
-        else:
+        elif expected is not None:
+            # Canonical direct equality to None also matches absent fields.
             conditions.append({key: {"$eq": _chroma_equality_value(expected)}})
     if not conditions:
         return None
@@ -238,6 +263,9 @@ def _chroma_equality_value(value: Any) -> str | int | float | bool:
 
 
 def _chroma_membership_values(values: Iterable[Any]) -> Optional[list[str | int | float | bool]]:
+    values = list(values)
+    if any(value is None for value in values):
+        return None
     encoded = [_chroma_equality_value(value) for value in values]
     if not encoded or len({type(value) for value in encoded}) != 1:
         return None
