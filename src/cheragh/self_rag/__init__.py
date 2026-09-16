@@ -1,7 +1,9 @@
 """Experimental inference-time Self-RAG components.
 
-These exports provide modular inference orchestration only; they do not
-implement Self-RAG model training or reflection-token learning.
+``SelfRAGEngine`` preserves the lightweight critic/refinement baseline.
+``SegmentedSelfRAGEngine`` provides the explicit model-conditioned segment
+search path, with ``TransformersSelfRAGDecoder`` for trained checkpoints.
+Neither path trains reflection tokens or claims benchmark equivalence.
 """
 
 from .engine import (
@@ -20,6 +22,23 @@ from .engine import (
     StaticRetrievalGate,
     SupportAssessment,
 )
+from .reflection import (
+    ReflectionScore,
+    ReflectionTokenDistribution,
+    ReflectionTokenGroup,
+    ReflectionTokenRetrievalGate,
+    ReflectionTokenScorer,
+)
+from .segmented import (
+    ReflectionDecoder,
+    ReflectionSegment,
+    RetrievalAction,
+    ScoredSegment,
+    SegmentedSelfRAGEngine,
+    SegmentedSelfRAGResult,
+    SegmentSearchTrace,
+)
+from .transformers import TransformersSelfRAGDecoder
 
 __all__ = [
     "AlwaysRetrieveGate",
@@ -36,4 +55,17 @@ __all__ = [
     "SelfRAGTrace",
     "StaticRetrievalGate",
     "SupportAssessment",
+    "ReflectionScore",
+    "ReflectionTokenDistribution",
+    "ReflectionTokenGroup",
+    "ReflectionTokenRetrievalGate",
+    "ReflectionTokenScorer",
+    "ReflectionDecoder",
+    "ReflectionSegment",
+    "RetrievalAction",
+    "ScoredSegment",
+    "SegmentedSelfRAGEngine",
+    "SegmentedSelfRAGResult",
+    "SegmentSearchTrace",
+    "TransformersSelfRAGDecoder",
 ]

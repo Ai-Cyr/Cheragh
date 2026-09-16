@@ -64,7 +64,11 @@ class MemoryVectorStore:
             return
         with self._embedding_lock:
             new_embeddings = np.asarray(self.embedding_model.embed_documents([doc.content for doc in new_docs]))
-        if new_embeddings.ndim != 2 or new_embeddings.shape[0] != len(new_docs):
+        if (
+            new_embeddings.ndim != 2
+            or new_embeddings.shape[0] != len(new_docs)
+            or new_embeddings.shape[1] == 0
+        ):
             raise ValueError(
                 "Embedding model returned an invalid matrix: expected "
                 f"({len(new_docs)}, dimension), got {new_embeddings.shape}"
@@ -91,11 +95,15 @@ class MemoryVectorStore:
                 )
             # Publish documents and vectors together under the data lock. New
             # containers keep snapshots already held by readers immutable.
-            self.documents = [*self.documents, *new_docs]
             if current_embeddings is None or len(current_embeddings) == 0:
-                self.embeddings = new_embeddings.copy()
+                merged_embeddings = new_embeddings.copy()
             else:
-                self.embeddings = np.vstack([current_embeddings, new_embeddings])
+                merged_embeddings = np.vstack([current_embeddings, new_embeddings])
+            # Allocate both containers before publishing either. If a large
+            # append runs out of memory, the previous snapshot remains aligned.
+            merged_documents = [*self.documents, *new_docs]
+            self.documents = merged_documents
+            self.embeddings = merged_embeddings
 
     def similarity_search(self, query: str, top_k: int = 5, filters: Optional[dict] = None) -> list[Document]:
         top_k = _validate_top_k(top_k)

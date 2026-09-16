@@ -33,7 +33,12 @@ from .generation import (
 )
 from .pipeline import PipelineEvaluationResult, evaluate_pipeline
 
+from .semantic import LLMClaimSegmenter, LLMFaithfulnessJudge, NLIFaithfulnessJudge
+
 __all__ = [
+    "LLMClaimSegmenter",
+    "LLMFaithfulnessJudge",
+    "NLIFaithfulnessJudge",
     "CitationAlignment",
     "Claim",
     "ClaimDiagnostic",

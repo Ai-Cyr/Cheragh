@@ -24,12 +24,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import hashlib
 import math
 from numbers import Real
 from typing import Dict, List, Protocol
 
 from .base import BaseRetriever, Document, LLMClient, _snapshot_document, _validate_top_k
 from .citations import validate_citations
+from .generation import ConfidenceDraft
 from .schema import RAGResponse, Source
 
 
@@ -236,6 +238,11 @@ class FLAREPipeline:
         retrieval_top_k: int = 3,
         min_draft_length: int = 20,
         uncertainty_estimator: DraftUncertaintyEstimator | None = None,
+        *,
+        draft_generator: Callable[[str], ConfidenceDraft] | None = None,
+        confidence_threshold: float = 0.5,
+        masking_threshold: float = 0.5,
+        retrieval_query_mode: str = "auto",
     ):
         if not callable(getattr(retriever, "retrieve", None)):
             raise TypeError("retriever must define retrieve()")
@@ -257,6 +264,21 @@ class FLAREPipeline:
         self.uncertainty_estimator = uncertainty_estimator or LengthBasedDraftUncertainty(
             min_draft_length=min_draft_length
         )
+        if draft_generator is not None and not callable(draft_generator):
+            raise TypeError("draft_generator must be callable")
+        if draft_generator is not None and uncertainty_estimator is not None:
+            raise ValueError("Choose draft_generator or uncertainty_estimator, not both")
+        for name, value in (("confidence_threshold", confidence_threshold), ("masking_threshold", masking_threshold)):
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError(f"{name} must be a real number")
+            if not math.isfinite(float(value)) or not 0 <= value <= 1:
+                raise ValueError(f"{name} must be finite and between 0 and 1")
+        if retrieval_query_mode not in {"auto", "masked", "low_confidence"}:
+            raise ValueError("retrieval_query_mode must be auto, masked or low_confidence")
+        self.draft_generator = draft_generator
+        self.confidence_threshold = float(confidence_threshold)
+        self.masking_threshold = float(masking_threshold)
+        self.retrieval_query_mode = retrieval_query_mode
 
     def run(self, query: str) -> Dict:
         """Execute FLARE and return the backward-compatible dictionary payload."""
@@ -320,19 +342,51 @@ class FLAREPipeline:
                 query=query,
                 partial_answer=partial_answer or "(rien encore)",
             )
-            draft = self.llm_client.generate(draft_prompt).strip()
+            generated = self.draft_generator(draft_prompt) if self.draft_generator is not None else None
+            if generated is not None and not isinstance(generated, ConfidenceDraft):
+                raise TypeError("draft_generator must return ConfidenceDraft")
+            if self.draft_generator is not None and generated is None:
+                raise TypeError("draft_generator must return ConfidenceDraft")
+            draft = generated.text.strip() if generated is not None else self.llm_client.generate(draft_prompt).strip()
 
-            if "[DONE]" in draft or not draft:
+            if draft == "[DONE]" or not draft:
                 break
 
             # 2) Retrieval guided by uncertainty in the look-ahead draft.
-            assessment = self.uncertainty_estimator.assess(query, partial_answer, draft)
+            if generated is not None:
+                assessment = DraftUncertainty(
+                    requires_retrieval=any(t.probability < self.confidence_threshold for t in generated.tokens),
+                    confidence=min((t.probability for t in generated.tokens), default=None),
+                    low_confidence_spans=tuple(
+                        t.text.strip() for t in generated.tokens
+                        if t.probability < self.masking_threshold and t.text.strip()
+                    ),
+                    rationale="generation_token_logprobs",
+                )
+            else:
+                assessment = self.uncertainty_estimator.assess(query, partial_answer, draft)
             if not isinstance(assessment, DraftUncertainty):
                 raise TypeError("uncertainty_estimator.assess() must return DraftUncertainty")
             retrieval_query: str | None = None
             if assessment.requires_retrieval:
-                focus = " ".join(assessment.low_confidence_spans).strip() or draft
-                retrieval_query = f"{query}\nIncertitude à vérifier: {focus}"
+                masked = self.retrieval_query_mode == "masked" or (
+                    self.retrieval_query_mode == "auto" and generated is not None
+                )
+                if masked:
+                    if generated is not None:
+                        focus = "".join(
+                            t.text if t.probability >= self.masking_threshold else " "
+                            for t in generated.tokens
+                        )
+                    else:
+                        focus = draft
+                        for span in sorted(assessment.low_confidence_spans, key=len, reverse=True):
+                            focus = focus.replace(span, " ")
+                    focus = " ".join(focus.split())
+                    retrieval_query = focus if any(c.isalnum() for c in focus) else query
+                else:
+                    focus = " ".join(assessment.low_confidence_spans).strip() or draft
+                    retrieval_query = f"{query}\nIncertitude à vérifier: {focus}"
                 hits = _validated_hits(
                     self.retriever.retrieve(retrieval_query, top_k=retrieval_top_k),
                     top_k=retrieval_top_k,
@@ -353,7 +407,7 @@ class FLAREPipeline:
                 # Pas de retrieval → on garde le brouillon tel quel
                 final_sentence = draft
 
-            if "[DONE]" in final_sentence or not final_sentence:
+            if final_sentence == "[DONE]" or not final_sentence:
                 break
 
             # 4) Ajout à la réponse et accumulation des sources
@@ -371,13 +425,10 @@ class FLAREPipeline:
                 "draft_confidence": assessment.confidence,
                 "low_confidence_spans": list(assessment.low_confidence_spans),
                 "uncertainty_rationale": assessment.rationale,
+                "retrieval_query_mode": "masked" if assessment.requires_retrieval and masked else "low_confidence",
                 "n_retrieved": len(hits),
                 "final_sentence": final_sentence,
             })
-
-            # Heuristique d'arrêt : si la phrase est une conclusion, on stoppe
-            if any(tok in final_sentence.lower() for tok in ["en conclusion", "en résumé", "[done]"]):
-                break
 
         documents = list(all_sources.values())
         return {
@@ -419,7 +470,10 @@ def _validated_hits(documents: Sequence[Document], *, top_k: int) -> list[Docume
                 raise TypeError(f"retrieved documents[{index}].score must be a real number or None")
             if not math.isfinite(float(document.score)):
                 raise ValueError(f"retrieved documents[{index}].score must be finite")
-        snapshots.append(_snapshot_document(document))
+        snapshot = _snapshot_document(document)
+        if not snapshot.doc_id:
+            snapshot.doc_id = f"flare::{hashlib.sha256(snapshot.content.encode('utf-8')).hexdigest()}"
+        snapshots.append(snapshot)
     return snapshots
 
 

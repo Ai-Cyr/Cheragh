@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 import csv
 import io
 import re
 from typing import Iterable, Sequence
 
-from ...base import Document, EmbeddingModel
+from ...base import Document, EmbeddingModel, _validate_top_k, _validate_non_negative_int
 from .recursive import RecursiveTextChunker
-from .structured import HTMLSectionChunker, MarkdownHeaderChunker, _split_sentences
+from .structured import HTMLSectionChunker, MarkdownHeaderChunker, _sentence_spans
 
 
 def _numpy():
@@ -33,14 +34,18 @@ class SemanticChunker:
     min_chunk_size: int = 40
     min_sentences: int = 1
     fallback_chunker: RecursiveTextChunker | None = None
+    buffer_size: int = 0
+    breakpoint_percentile: float | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.breakpoint_threshold <= 1:
             raise ValueError("breakpoint_threshold must be between 0 and 1")
-        if self.max_chunk_size <= 0:
-            raise ValueError("max_chunk_size must be > 0")
-        if self.min_sentences <= 0:
-            raise ValueError("min_sentences must be > 0")
+        _validate_top_k(self.max_chunk_size, name="max_chunk_size")
+        _validate_top_k(self.min_sentences, name="min_sentences")
+        _validate_non_negative_int(self.min_chunk_size, name="min_chunk_size")
+        _validate_non_negative_int(self.buffer_size, name="buffer_size")
+        if self.breakpoint_percentile is not None and not 0 < self.breakpoint_percentile < 100:
+            raise ValueError("breakpoint_percentile must be between 0 and 100")
         if self.fallback_chunker is None:
             self.fallback_chunker = RecursiveTextChunker(
                 chunk_size=self.max_chunk_size,
@@ -56,10 +61,14 @@ class SemanticChunker:
             for idx, spec in enumerate(specs):
                 content = str(spec["content"]).strip()
                 if len(content) > self.max_chunk_size and self.fallback_chunker is not None:
-                    parent = Document(content=content, metadata=dict(doc.metadata), doc_id=f"{base_id}#semantic-{idx}")
+                    parent = Document(content=content, metadata=deepcopy(doc.metadata), doc_id=f"{base_id}#semantic-{idx}")
                     for fallback_doc in self.fallback_chunker.split_documents([parent]):
+                        offset = int(spec["source_char_start"])
+                        fallback_doc.metadata["source_char_start"] += offset
+                        fallback_doc.metadata["source_char_end"] += offset
                         fallback_doc.metadata.update(
                             {
+                                "parent_doc_id": base_id,
                                 "chunk_method": "semantic+recursive",
                                 "semantic_breakpoint_threshold": self.breakpoint_threshold,
                                 "sentence_start": spec.get("sentence_start"),
@@ -68,13 +77,11 @@ class SemanticChunker:
                         )
                         chunks.append(fallback_doc)
                     continue
-                if len(content) < self.min_chunk_size:
-                    continue
                 chunks.append(
                     Document(
                         content=content,
                         metadata={
-                            **doc.metadata,
+                            **deepcopy(doc.metadata),
                             "chunk_index": idx,
                             "parent_doc_id": base_id,
                             "chunk_method": "semantic",
@@ -82,6 +89,8 @@ class SemanticChunker:
                             "sentence_start": spec.get("sentence_start"),
                             "sentence_end": spec.get("sentence_end"),
                             "avg_adjacent_similarity": spec.get("avg_adjacent_similarity"),
+                            "source_char_start": spec["source_char_start"],
+                            "source_char_end": spec["source_char_end"],
                         },
                         doc_id=f"{base_id}#semantic-{idx}",
                     )
@@ -89,14 +98,23 @@ class SemanticChunker:
         return chunks
 
     def split_text(self, text: str) -> list[dict[str, object]]:
-        sentences = _split_sentences(text)
+        spans = _sentence_spans(text)
+        sentences = [text[start:end] for start, end in spans]
         if not sentences:
             return []
         if len(sentences) == 1:
-            return [{"content": sentences[0], "sentence_start": 0, "sentence_end": 0, "avg_adjacent_similarity": None}]
+            return [{"content": sentences[0], "sentence_start": 0, "sentence_end": 0,
+                     "source_char_start": spans[0][0], "source_char_end": spans[0][1], "avg_adjacent_similarity": None}]
 
-        embeddings = self.embedding_model.embed_documents(sentences)
+        buffered = [" ".join(sentences[max(0, i-self.buffer_size):i+self.buffer_size+1]) for i in range(len(sentences))]
+        embeddings = self.embedding_model.embed_documents(buffered)
+        np = _numpy()
+        embeddings = np.asarray(embeddings, dtype=float)
+        if embeddings.ndim != 2 or embeddings.shape[0] != len(sentences) or embeddings.shape[1] == 0 or not np.isfinite(embeddings).all():
+            raise ValueError("SemanticChunker requires one finite embedding per buffered sentence")
         similarities = _adjacent_cosine_similarities(embeddings)
+        threshold = (1 - float(np.percentile(1 - similarities, self.breakpoint_percentile))
+                     if self.breakpoint_percentile is not None else self.breakpoint_threshold)
         chunks: list[dict[str, object]] = []
         start = 0
         current_sentences: list[str] = []
@@ -109,13 +127,15 @@ class SemanticChunker:
             if idx > start:
                 current_sims.append(float(similarities[idx - 1]))
 
-            semantic_break = idx < len(similarities) and float(similarities[idx]) < self.breakpoint_threshold
+            semantic_break = idx < len(similarities) and float(similarities[idx]) < threshold
             size_break = current_len >= self.max_chunk_size
             enough = len(current_sentences) >= self.min_sentences and current_len >= self.min_chunk_size
             if idx < len(sentences) - 1 and enough and (semantic_break or size_break):
                 chunks.append(
                     {
-                        "content": " ".join(current_sentences).strip(),
+                        "content": text[spans[start][0]:spans[idx][1]],
+                        "source_char_start": spans[start][0],
+                        "source_char_end": spans[idx][1],
                         "sentence_start": start,
                         "sentence_end": idx,
                         "avg_adjacent_similarity": _safe_mean(current_sims),
@@ -129,7 +149,9 @@ class SemanticChunker:
         if current_sentences:
             chunks.append(
                 {
-                    "content": " ".join(current_sentences).strip(),
+                    "content": text[spans[start][0]:spans[-1][1]],
+                    "source_char_start": spans[start][0],
+                    "source_char_end": spans[-1][1],
                     "sentence_start": start,
                     "sentence_end": len(sentences) - 1,
                     "avg_adjacent_similarity": _safe_mean(current_sims),
@@ -392,12 +414,14 @@ def _adjacent_cosine_similarities(embeddings):
     embeddings = np.asarray(embeddings, dtype=float)
     if len(embeddings) < 2:
         return np.array([], dtype=float)
-    left = embeddings[:-1]
-    right = embeddings[1:]
+    scales = np.max(np.abs(embeddings), axis=1, keepdims=True)
+    normalized = np.divide(embeddings, scales, out=np.zeros_like(embeddings), where=scales > 0)
+    left = normalized[:-1]
+    right = normalized[1:]
     left_norm = np.linalg.norm(left, axis=1)
     right_norm = np.linalg.norm(right, axis=1)
     denom = left_norm * right_norm
-    sims = np.divide((left * right).sum(axis=1), denom, out=np.zeros_like(denom, dtype=float), where=denom > 1e-12)
+    sims = np.divide((left * right).sum(axis=1), denom, out=np.zeros_like(denom, dtype=float), where=denom > 0)
     return np.clip(sims, -1.0, 1.0)
 
 

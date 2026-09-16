@@ -228,8 +228,9 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--port", type=_positive_int, default=8000)
     serve.add_argument(
         "--enable-indexing",
-        action="store_true",
-        help="Enable the disabled-by-default POST /index endpoint",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable POST /index (defaults to CHERAGH_ENABLE_INDEXING, otherwise disabled)",
     )
     serve.add_argument("--index-root", default=None, help="Restrict POST /index paths to this root")
     serve.add_argument(

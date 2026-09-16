@@ -127,7 +127,23 @@ class CLIPMultimodalEmbedding(MultimodalEmbeddingModel):
 
     def embed_documents(self, documents: Sequence[MultimodalDocument]) -> Any:
         payloads = [self._payload(doc.modality, doc.content, doc.uri) for doc in documents]
-        return _numpy().asarray(self.model.encode(payloads, normalize_embeddings=True, show_progress_bar=False))
+        np = _numpy()
+        if not payloads:
+            return np.asarray(self.model.encode([], normalize_embeddings=True, show_progress_bar=False))
+        # Recent Sentence-Transformers CLIP processors require homogeneous
+        # batches. Group the actual payloads (an image caption can be text),
+        # then restore the caller's document order.
+        positions: list[int] = []
+        batches = []
+        for text_payloads in (True, False):
+            indices = [i for i, payload in enumerate(payloads) if isinstance(payload, str) == text_payloads]
+            if indices:
+                encoded = self.model.encode(
+                    [payloads[i] for i in indices], normalize_embeddings=True, show_progress_bar=False,
+                )
+                batches.append(np.asarray(encoded))
+                positions.extend(indices)
+        return np.concatenate(batches, axis=0)[np.argsort(positions)]
 
     def embed_query(self, query: MultimodalQuery) -> Any:
         payload = self._payload(query.modality, query.text, query.uri)

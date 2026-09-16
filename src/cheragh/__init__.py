@@ -23,6 +23,52 @@ from .base import (
 )
 
 if TYPE_CHECKING:
+    from .training import GenerativeTrainingExample as GenerativeTrainingExample
+    from .training import GenerativeTrainingReport as GenerativeTrainingReport
+    from .training import TransformersGenerativeTrainer as TransformersGenerativeTrainer
+    from .training import RankRAGDatasetBuilder as RankRAGDatasetBuilder
+    from .training import RankRAGModel as RankRAGModel
+    from .training import RankRAGEngine as RankRAGEngine
+    from .temporal import TemporalInterval as TemporalInterval
+    from .temporal import TemporalFact as TemporalFact
+    from .temporal import TemporalConstraint as TemporalConstraint
+    from .temporal import TimeR4Result as TimeR4Result
+    from .temporal import TimeR4Retriever as TimeR4Retriever
+    from .temporal import build_temporal_training_example as build_temporal_training_example
+    from .corrective import CrossEncoderRetrievalGrader as CrossEncoderRetrievalGrader
+    from .corrective import LogisticCalibration as LogisticCalibration
+    from .corrective import SemanticKnowledgeRefiner as SemanticKnowledgeRefiner
+    from .adaptive_learning import AdaptiveTrainingQuestion as AdaptiveTrainingQuestion
+    from .adaptive_learning import AdaptiveStrategyOutcome as AdaptiveStrategyOutcome
+    from .adaptive_learning import AdaptiveTrainingExample as AdaptiveTrainingExample
+    from .adaptive_learning import AdaptiveSilverDatasetBuilder as AdaptiveSilverDatasetBuilder
+    from .adaptive_learning import AdaptiveClassifierTrainingReport as AdaptiveClassifierTrainingReport
+    from .adaptive_learning import TransformersComplexityClassifier as TransformersComplexityClassifier
+    from .adaptive_learning import normalized_answer_exact_match as normalized_answer_exact_match
+    from .long_rag import LongRAGRetriever as LongRAGRetriever
+    from .long_rag import LongRAGGroup as LongRAGGroup
+    from .long_rag import LongRAGEngine as LongRAGEngine
+    from .long_rag import group_documents as group_documents
+    from .evaluation import LLMClaimSegmenter as LLMClaimSegmenter
+    from .evaluation import LLMFaithfulnessJudge as LLMFaithfulnessJudge
+    from .evaluation import NLIFaithfulnessJudge as NLIFaithfulnessJudge
+    from .hyqe import HyQEReranker as HyQEReranker
+    from .step_back import StepBackRAGEngine as StepBackRAGEngine
+    from .chain_of_note import ChainOfNoteRAGEngine as ChainOfNoteRAGEngine
+    from .propositional import TransformersPropositionizer as TransformersPropositionizer
+    from .retrieval import SPLADEEncoder as SPLADEEncoder
+    from .retrieval import ColBERTTokenEncoder as ColBERTTokenEncoder
+    from .community_graph import GraphEntity as GraphEntity
+    from .community_graph import SemanticKnowledgeGraph as SemanticKnowledgeGraph
+    from .community_graph import LLMGraphExtractor as LLMGraphExtractor
+    from .community_graph import LocalGraphSearchConfig as LocalGraphSearchConfig
+    from .self_rag import ReflectionDecoder as ReflectionDecoder
+    from .self_rag import ReflectionSegment as ReflectionSegment
+    from .self_rag import ScoredSegment as ScoredSegment
+    from .self_rag import SegmentedSelfRAGEngine as SegmentedSelfRAGEngine
+    from .self_rag import SegmentedSelfRAGResult as SegmentedSelfRAGResult
+    from .self_rag import SegmentSearchTrace as SegmentSearchTrace
+    from .self_rag import TransformersSelfRAGDecoder as TransformersSelfRAGDecoder
     from .adaptive import AdaptiveRAGEngine as AdaptiveRAGEngine
     from .adaptive import AdaptiveRAGRoute as AdaptiveRAGRoute
     from .adaptive import AdaptiveRetriever as AdaptiveRetriever
@@ -155,6 +201,17 @@ if TYPE_CHECKING:
     from .flare import LengthBasedDraftUncertainty as LengthBasedDraftUncertainty
     from .flare import TokenConfidence as TokenConfidence
     from .flare import TokenConfidenceUncertaintyEstimator as TokenConfidenceUncertaintyEstimator
+    from .generation import ConfidenceDraft as ConfidenceDraft
+    from .generation import GeneratedToken as GeneratedToken
+    from .self_rag import ReflectionTokenGroup as ReflectionTokenGroup
+    from .self_rag import ReflectionTokenDistribution as ReflectionTokenDistribution
+    from .self_rag import ReflectionScore as ReflectionScore
+    from .self_rag import ReflectionTokenScorer as ReflectionTokenScorer
+    from .self_rag import ReflectionTokenRetrievalGate as ReflectionTokenRetrievalGate
+    from .community_graph import GlobalMapReduceConfig as GlobalMapReduceConfig
+    from .community_graph import LeidenCommunityDetector as LeidenCommunityDetector
+    from .community_graph import LLMCommunitySummarizer as LLMCommunitySummarizer
+    from .community_graph import global_map_reduce as global_map_reduce
     from .graph import GraphRAGEngine as GraphRAGEngine
     from .graph import GraphRAGRetriever as GraphRAGRetriever
     from .graph import KnowledgeGraph as KnowledgeGraph
@@ -235,6 +292,8 @@ if TYPE_CHECKING:
     from .raptor_engine import RAPTORIndex as RAPTORIndex
     from .raptor_engine import RAPTORNode as RAPTORNode
     from .raptor_engine import RAPTORRetrieverV2 as RAPTORRetrieverV2
+    from .raptor_engine import RAPTORClusteringConfig as RAPTORClusteringConfig
+    from .raptor_engine import UMAPGMMClusterer as UMAPGMMClusterer
     from .reranking import BaseReranker as BaseReranker
     from .reranking import CohereReranker as CohereReranker
     from .reranking import CrossEncoderReranker as CrossEncoderReranker
@@ -315,6 +374,8 @@ if TYPE_CHECKING:
     from .training import HardNegativeMiner as HardNegativeMiner
     from .training import RAFTDatasetBuilder as RAFTDatasetBuilder
     from .training import RAFTTrainingRecord as RAFTTrainingRecord
+    from .training import RAFTGeneratedAnswer as RAFTGeneratedAnswer
+    from .training import TorchRetrievalTrainer as TorchRetrievalTrainer
     from .training import RetrievalTrainerProtocol as RetrievalTrainerProtocol
     from .training import RetrievalTrainingExample as RetrievalTrainingExample
     from .training import RetrievalTrainingPipeline as RetrievalTrainingPipeline
@@ -339,6 +400,52 @@ if TYPE_CHECKING:
 __version__ = "1.4.0"
 
 _LAZY_EXPORTS = {
+    "GenerativeTrainingExample": (".training", "GenerativeTrainingExample"),
+    "GenerativeTrainingReport": (".training", "GenerativeTrainingReport"),
+    "TransformersGenerativeTrainer": (".training", "TransformersGenerativeTrainer"),
+    "RankRAGDatasetBuilder": (".training", "RankRAGDatasetBuilder"),
+    "RankRAGModel": (".training", "RankRAGModel"),
+    "RankRAGEngine": (".training", "RankRAGEngine"),
+    "TemporalInterval": (".temporal", "TemporalInterval"),
+    "TemporalFact": (".temporal", "TemporalFact"),
+    "TemporalConstraint": (".temporal", "TemporalConstraint"),
+    "TimeR4Result": (".temporal", "TimeR4Result"),
+    "TimeR4Retriever": (".temporal", "TimeR4Retriever"),
+    "build_temporal_training_example": (".temporal", "build_temporal_training_example"),
+    "CrossEncoderRetrievalGrader": (".corrective", "CrossEncoderRetrievalGrader"),
+    "LogisticCalibration": (".corrective", "LogisticCalibration"),
+    "SemanticKnowledgeRefiner": (".corrective", "SemanticKnowledgeRefiner"),
+    "AdaptiveTrainingQuestion": (".adaptive_learning", "AdaptiveTrainingQuestion"),
+    "AdaptiveStrategyOutcome": (".adaptive_learning", "AdaptiveStrategyOutcome"),
+    "AdaptiveTrainingExample": (".adaptive_learning", "AdaptiveTrainingExample"),
+    "AdaptiveSilverDatasetBuilder": (".adaptive_learning", "AdaptiveSilverDatasetBuilder"),
+    "AdaptiveClassifierTrainingReport": (".adaptive_learning", "AdaptiveClassifierTrainingReport"),
+    "TransformersComplexityClassifier": (".adaptive_learning", "TransformersComplexityClassifier"),
+    "normalized_answer_exact_match": (".adaptive_learning", "normalized_answer_exact_match"),
+    "LongRAGRetriever": (".long_rag", "LongRAGRetriever"),
+    "LongRAGGroup": (".long_rag", "LongRAGGroup"),
+    "LongRAGEngine": (".long_rag", "LongRAGEngine"),
+    "group_documents": (".long_rag", "group_documents"),
+    "LLMClaimSegmenter": (".evaluation", "LLMClaimSegmenter"),
+    "LLMFaithfulnessJudge": (".evaluation", "LLMFaithfulnessJudge"),
+    "NLIFaithfulnessJudge": (".evaluation", "NLIFaithfulnessJudge"),
+    "HyQEReranker": (".hyqe", "HyQEReranker"),
+    "StepBackRAGEngine": (".step_back", "StepBackRAGEngine"),
+    "ChainOfNoteRAGEngine": (".chain_of_note", "ChainOfNoteRAGEngine"),
+    "TransformersPropositionizer": (".propositional", "TransformersPropositionizer"),
+    "SPLADEEncoder": (".retrieval", "SPLADEEncoder"),
+    "ColBERTTokenEncoder": (".retrieval", "ColBERTTokenEncoder"),
+    "GraphEntity": (".community_graph", "GraphEntity"),
+    "SemanticKnowledgeGraph": (".community_graph", "SemanticKnowledgeGraph"),
+    "LLMGraphExtractor": (".community_graph", "LLMGraphExtractor"),
+    "LocalGraphSearchConfig": (".community_graph", "LocalGraphSearchConfig"),
+    "ReflectionDecoder": (".self_rag", "ReflectionDecoder"),
+    "ReflectionSegment": (".self_rag", "ReflectionSegment"),
+    "ScoredSegment": (".self_rag", "ScoredSegment"),
+    "SegmentedSelfRAGEngine": (".self_rag", "SegmentedSelfRAGEngine"),
+    "SegmentedSelfRAGResult": (".self_rag", "SegmentedSelfRAGResult"),
+    "SegmentSearchTrace": (".self_rag", "SegmentSearchTrace"),
+    "TransformersSelfRAGDecoder": (".self_rag", "TransformersSelfRAGDecoder"),
     "embedder_fingerprint": (".cache", "embedder_fingerprint"),
     "hash_documents": (".cache", "hash_documents"),
     "load_cache": (".cache", "load_cache"),
@@ -592,6 +699,8 @@ _LAZY_EXPORTS = {
     "RAPTORIndex": (".raptor_engine", "RAPTORIndex"),
     "RAPTORNode": (".raptor_engine", "RAPTORNode"),
     "RAPTORRetrieverV2": (".raptor_engine", "RAPTORRetrieverV2"),
+    "RAPTORClusteringConfig": (".raptor_engine", "RAPTORClusteringConfig"),
+    "UMAPGMMClusterer": (".raptor_engine", "UMAPGMMClusterer"),
     "FederatedRAGEngine": (".federated", "FederatedRAGEngine"),
     "FederatedRAGResult": (".federated", "FederatedRAGResult"),
     "FederatedRetriever": (".federated", "FederatedRetriever"),
@@ -626,6 +735,17 @@ _LAZY_EXPORTS = {
     "DraftUncertainty": (".flare", "DraftUncertainty"),
     "DraftUncertaintyEstimator": (".flare", "DraftUncertaintyEstimator"),
     "FLAREPipeline": (".flare", "FLAREPipeline"),
+    "ConfidenceDraft": (".generation", "ConfidenceDraft"),
+    "GeneratedToken": (".generation", "GeneratedToken"),
+    "ReflectionTokenGroup": (".self_rag", "ReflectionTokenGroup"),
+    "ReflectionTokenDistribution": (".self_rag", "ReflectionTokenDistribution"),
+    "ReflectionScore": (".self_rag", "ReflectionScore"),
+    "ReflectionTokenScorer": (".self_rag", "ReflectionTokenScorer"),
+    "ReflectionTokenRetrievalGate": (".self_rag", "ReflectionTokenRetrievalGate"),
+    "GlobalMapReduceConfig": (".community_graph", "GlobalMapReduceConfig"),
+    "LeidenCommunityDetector": (".community_graph", "LeidenCommunityDetector"),
+    "LLMCommunitySummarizer": (".community_graph", "LLMCommunitySummarizer"),
+    "global_map_reduce": (".community_graph", "global_map_reduce"),
     "LengthBasedDraftUncertainty": (".flare", "LengthBasedDraftUncertainty"),
     "TokenConfidence": (".flare", "TokenConfidence"),
     "TokenConfidenceUncertaintyEstimator": (".flare", "TokenConfidenceUncertaintyEstimator"),
@@ -647,6 +767,8 @@ _LAZY_EXPORTS = {
     "HardNegativeMiner": (".training", "HardNegativeMiner"),
     "RAFTDatasetBuilder": (".training", "RAFTDatasetBuilder"),
     "RAFTTrainingRecord": (".training", "RAFTTrainingRecord"),
+    "RAFTGeneratedAnswer": (".training", "RAFTGeneratedAnswer"),
+    "TorchRetrievalTrainer": (".training", "TorchRetrievalTrainer"),
     "RetrievalTrainerProtocol": (".training", "RetrievalTrainerProtocol"),
     "RetrievalTrainingExample": (".training", "RetrievalTrainingExample"),
     "RetrievalTrainingPipeline": (".training", "RetrievalTrainingPipeline"),

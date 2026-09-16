@@ -1,17 +1,15 @@
 """RAPTOR-style hierarchical summarization and retrieval.
 
-The index construction remains intentionally lightweight and dependency-free.
-Retrieval supports both strategies evaluated in the RAPTOR paper: a collapsed
-(``flat``) tree search for backwards compatibility and a budgeted, top-down
-beam traversal that follows relevant summaries towards their leaves.
-
-This module is a practical baseline, not a reproduction of RAPTOR's learned
-Gaussian-mixture clustering or model-specific summarization pipeline.
+The default construction uses lightweight greedy clustering. Opt into the
+paper's global/local UMAP and soft GMM mechanism with ``umap_gmm``. Retrieval
+offers collapsed (``flat``) search, legacy path-averaged ``tree`` search and
+``paper_tree`` traversal that ranks by node cosine and retains all levels.
+The paper's exact model choices and benchmark results are not reproduced.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
-from copy import deepcopy
+from collections.abc import Callable, Mapping, Sequence
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 import math
 from numbers import Real
@@ -30,7 +28,10 @@ from ..base import (
     cosine_similarity,
 )
 from ..engine import RAGEngine, RAGResponse
+from ..context_packing import approximate_token_count
+from ..security.access_control import AccessPolicy, Principal
 from ..vectorstores import MemoryVectorStore
+from .clustering import RAPTORClusteringConfig, UMAPGMMClusterer
 
 
 SUMMARY_PROMPT = """Résume les extraits suivants en conservant les faits vérifiables, entités, dates et relations.
@@ -149,8 +150,14 @@ class RAPTORRetrieverV2(BaseRetriever):
         beam_width: Maximum number of nodes selected at each traversal depth.
         traversal_budget: Maximum number of unique candidate nodes scored per
             query. Selected/visited nodes are necessarily bounded by this cap.
+        retrieval_token_budget: Optional maximum tokens in the concatenated
+            retrieved text, according to ``token_estimator``. Prompt wrappers
+            and answer tokens are not included; budget these in the RAG engine.
+        start_level: Optional starting layer for ``paper_tree`` retrieval;
+            level zero is the original source chunks.
+        num_levels: Number of layers to visit from that starting layer.
 
-    The tree traversal ranks candidates by the mean similarity along their
+    The legacy tree traversal ranks candidates by the mean similarity along their
     root-to-node path. This deterministic path score keeps ancestor relevance
     in the decision instead of treating every leaf as an unrelated flat item.
     """
@@ -165,6 +172,8 @@ class RAPTORRetrieverV2(BaseRetriever):
         "traversal": "tree",
         "tree-traversal": "tree",
         "tree_traversal": "tree",
+        "paper_tree": "paper_tree",
+        "paper-tree": "paper_tree",
     }
 
     def __init__(
@@ -174,6 +183,10 @@ class RAPTORRetrieverV2(BaseRetriever):
         retrieval_mode: str = "flat",
         beam_width: int = 4,
         traversal_budget: int = 64,
+        retrieval_token_budget: int | None = None,
+        token_estimator: Callable[[str], int] = approximate_token_count,
+        start_level: int | None = None,
+        num_levels: int | None = None,
     ):
         if not isinstance(index, RAPTORIndex):
             raise TypeError("index must be a RAPTORIndex")
@@ -189,6 +202,15 @@ class RAPTORRetrieverV2(BaseRetriever):
             traversal_budget,
             name="traversal_budget",
         )
+        self.retrieval_token_budget = (
+            None if retrieval_token_budget is None
+            else _validate_top_k(retrieval_token_budget, name="retrieval_token_budget")
+        )
+        if not callable(token_estimator):
+            raise TypeError("token_estimator must be callable")
+        self.token_estimator = token_estimator
+        self.start_level = start_level
+        self.num_levels = num_levels
         self._nodes_by_id: dict[str, RAPTORNode] = {}
         self._node_positions: dict[str, int] = {}
         for position, node in enumerate(self.index.nodes):
@@ -227,10 +249,62 @@ class RAPTORRetrieverV2(BaseRetriever):
         }
         roots = [node_id for node_id, parent_ids in self._parents.items() if not parent_ids]
         self._root_ids = tuple(sorted(roots, key=self._root_sort_key))
+        self._source_ids: dict[str, tuple[str, ...]] = {}
+        for node_id, node in sorted(self._nodes_by_id.items(), key=lambda item: item[1].level):
+            sources = ({node_id} if node.level == 0 else
+                       {source for child in self._children[node_id] for source in self._source_ids[child]})
+            complete = (node.level == 0 or bool(self._children[node_id]) and
+                        all(self._nodes_by_id[child].document.metadata["raptor_provenance_complete"]
+                            for child in self._children[node_id]))
+            self._source_ids[node_id] = tuple(sorted(sources))
+            node.document.metadata.update({"source_doc_ids": sorted(sources), "raptor_provenance_complete": complete})
+        self._validate_levels(start_level, num_levels, self.retrieval_mode)
 
         self.store = MemoryVectorStore(self.embedding_model)
         self.store.add_documents(self.index.documents())
         self.retriever = self.store.as_retriever()
+
+    def for_principal(self, principal: Principal | Mapping[str, Any] | None,
+                      policy: AccessPolicy | None = None) -> RAPTORRetrieverV2:
+        """Authorize every original leaf before scoring any derived summary."""
+        return self.scoped(principal=principal, access_policy=policy if policy is not None else AccessPolicy())
+
+    def scoped(self, *, allowed_doc_ids: Iterable[str] | None = None,
+               principal: Principal | Mapping[str, Any] | None = None, access_policy: AccessPolicy | None = None,
+               tenant_id: str | None = None, collection_id: str | None = None) -> RAPTORRetrieverV2:
+        """Detached query view; mixed and incomplete summary provenance fails closed.
+
+        Embeddings are reused, but disallowed nodes are excluded before scoring
+        and traversal. Authorized leaves below an excluded parent become roots.
+        """
+        allowed = {node_id for node_id, node in self._nodes_by_id.items() if node.level == 0}
+        if allowed_doc_ids is not None:
+            if isinstance(allowed_doc_ids, (str, bytes)):
+                raise TypeError("allowed_doc_ids must be an iterable of original source IDs")
+            requested = list(allowed_doc_ids)
+            if any(not isinstance(item, str) or not item.strip() for item in requested):
+                raise ValueError("allowed_doc_ids must contain non-empty strings")
+            allowed.intersection_update(requested)
+        for key, value in (("tenant_id", tenant_id), ("collection_id", collection_id)):
+            if value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{key} must be a non-empty string")
+                allowed = {source for source in allowed if self._nodes_by_id[source].document.metadata.get(key) == value}
+        if principal is not None or access_policy is not None:
+            policy = access_policy if access_policy is not None else AccessPolicy()
+            allowed = {source for source in allowed
+                       if policy.authorize(_snapshot_document(self._nodes_by_id[source].document), principal).allowed}
+        view = copy(self)
+        view._nodes_by_id = {node_id: node for node_id, node in self._nodes_by_id.items()
+                             if node.document.metadata["raptor_provenance_complete"] and self._source_ids[node_id]
+                             and set(self._source_ids[node_id]) <= allowed}
+        view._children = {node_id: tuple(child for child in self._children[node_id] if child in view._nodes_by_id)
+                          for node_id in view._nodes_by_id}
+        view._parents = {node_id: tuple(parent for parent in self._parents[node_id] if parent in view._nodes_by_id)
+                         for node_id in view._nodes_by_id}
+        view._root_ids = tuple(sorted((node_id for node_id in view._nodes_by_id if not view._parents[node_id]),
+                                      key=view._root_sort_key))
+        return view
 
     def retrieve(
         self,
@@ -240,7 +314,21 @@ class RAPTORRetrieverV2(BaseRetriever):
         retrieval_mode: str | None = None,
         beam_width: int | None = None,
         traversal_budget: int | None = None,
+        retrieval_token_budget: int | None = None,
+        start_level: int | None = None,
+        num_levels: int | None = None,
+        allowed_doc_ids: Iterable[str] | None = None,
+        principal: Principal | Mapping[str, Any] | None = None,
+        access_policy: AccessPolicy | None = None,
+        tenant_id: str | None = None,
+        collection_id: str | None = None,
     ) -> list[Document]:
+        if any(value is not None for value in (allowed_doc_ids, principal, access_policy, tenant_id, collection_id)):
+            return self.scoped(allowed_doc_ids=allowed_doc_ids, principal=principal, access_policy=access_policy,
+                               tenant_id=tenant_id, collection_id=collection_id).retrieve(
+                query, top_k, retrieval_mode=retrieval_mode, beam_width=beam_width,
+                traversal_budget=traversal_budget, retrieval_token_budget=retrieval_token_budget,
+                start_level=start_level, num_levels=num_levels)
         query = _validate_query(query)
         top_k = _validate_top_k(top_k)
         mode = self.retrieval_mode if retrieval_mode is None else self._normalize_mode(retrieval_mode)
@@ -254,28 +342,136 @@ class RAPTORRetrieverV2(BaseRetriever):
             if traversal_budget is None
             else _validate_top_k(traversal_budget, name="traversal_budget")
         )
+        token_budget = self.retrieval_token_budget if retrieval_token_budget is None else _validate_top_k(
+            retrieval_token_budget, name="retrieval_token_budget"
+        )
+        start = self.start_level if start_level is None else start_level
+        depth = self.num_levels if num_levels is None else num_levels
+        self._validate_levels(start, depth, mode)
         if not self._nodes_by_id:
             return []
         if mode == "flat":
-            return self._retrieve_flat(query, top_k=top_k)
-        return self._retrieve_tree(
-            query,
-            top_k=top_k,
-            beam_width=effective_beam_width,
-            traversal_budget=effective_budget,
+            results = self._retrieve_flat(query, top_k=top_k)
+        elif mode == "paper_tree":
+            results = self._retrieve_paper_tree(
+                query, top_k=top_k, beam_width=effective_beam_width, traversal_budget=effective_budget,
+                start_level=start, num_levels=depth,
+            )
+        else:
+            results = self._retrieve_tree(
+                query, top_k=top_k, beam_width=effective_beam_width, traversal_budget=effective_budget,
+            )
+        if token_budget is None:
+            return results
+        retained: list[Document] = []
+        text = ""
+        for document in results:
+            candidate = f"{text}\n\n{document.content}" if retained else document.content
+            count = _count_tokens(self.token_estimator, candidate)
+            if count > token_budget:
+                break
+            document.metadata["raptor_retrieval_token_budget"] = token_budget
+            document.metadata["raptor_context_tokens_so_far"] = count
+            retained.append(document)
+            text = candidate
+        return retained
+
+    def _retrieve_paper_tree(
+        self, query: str, *, top_k: int, beam_width: int, traversal_budget: int,
+        start_level: int | None = None, num_levels: int | None = None,
+    ) -> list[Document]:
+        """Rank each frontier by its own cosine and retain every selected level.
+
+        ``beam_width`` is the paper's per-level k. The public ``top_k`` remains
+        an additional total-result cap. Increase it to at least k * tree depth
+        to retain every selected node. The scoring cap bounds production work.
+        """
+        embeddings = self.store.embeddings
+        if embeddings is None:
+            return []
+        query_vector = self.embedding_model.embed_query(query)
+        initial = self._root_ids if start_level is None else tuple(
+            node_id for node_id, node in self._nodes_by_id.items() if node.level == start_level
         )
+        frontier: dict[str, tuple[str, ...]] = {node_id: (node_id,) for node_id in initial}
+        visited: set[str] = set()
+        scores: dict[str, float] = {}
+        selected_nodes: list[tuple[str, tuple[str, ...]]] = []
+        traversed_levels = 0
+        while frontier and len(selected_nodes) < top_k and (num_levels is None or traversed_levels < num_levels):
+            traversed_levels += 1
+            candidates = sorted(node_id for node_id in frontier if node_id not in visited)
+            new_ids = [node_id for node_id in candidates if node_id not in scores]
+            new_ids = new_ids[:traversal_budget - len(scores)]
+            if new_ids:
+                positions = [self._node_positions[node_id] for node_id in new_ids]
+                values = cosine_similarity(query_vector, embeddings[positions])
+                scores.update({node_id: self._finite_score(score) for node_id, score in zip(new_ids, values)})
+            ranked = sorted(
+                (node_id for node_id in candidates if node_id in scores),
+                key=lambda node_id: (-scores[node_id], node_id),
+            )[:min(beam_width, top_k - len(selected_nodes))]
+            next_frontier: dict[str, tuple[str, ...]] = {}
+            for node_id in ranked:
+                path = frontier[node_id]
+                visited.add(node_id)
+                selected_nodes.append((node_id, path))
+                for child_id in self._children[node_id]:
+                    if child_id not in visited:
+                        child_path = path + (child_id,)
+                        if child_id not in next_frontier or child_path < next_frontier[child_id]:
+                            next_frontier[child_id] = child_path
+            frontier = next_frontier
+        results = []
+        for node_id, path in selected_nodes:
+            output = self._nodes_by_id[node_id].to_document()
+            output.score = scores[node_id]
+            output.metadata.update({
+                "retrieval_method": "raptor",
+                "raptor_retrieval_mode": "paper_tree",
+                "raptor_path": list(path),
+                "raptor_path_levels": [self._nodes_by_id[item].level for item in path],
+                "raptor_node_score": scores[node_id],
+                "raptor_scored_nodes": len(scores),
+                "raptor_visited_nodes": len(visited),
+                "raptor_beam_width": beam_width,
+                "raptor_traversal_budget": traversal_budget,
+                "raptor_start_level": start_level,
+                "raptor_num_levels": num_levels,
+            })
+            results.append(output)
+        return results
+
+    def _validate_levels(self, start_level: int | None, num_levels: int | None, mode: str) -> None:
+        if start_level is None and num_levels is None:
+            return
+        if mode != "paper_tree":
+            raise ValueError("start_level and num_levels require retrieval_mode='paper_tree'")
+        maximum = max((node.level for node in self.index.nodes), default=0)
+        if start_level is not None:
+            start_level = _validate_non_negative_int(start_level, name="start_level")
+            if start_level > maximum:
+                raise ValueError("start_level exceeds the RAPTOR tree height")
+            if self.index.nodes and not any(node.level == start_level for node in self.index.nodes):
+                raise ValueError("start_level does not exist in the RAPTOR index")
+        if num_levels is not None:
+            num_levels = _validate_top_k(num_levels, name="num_levels")
+            if num_levels > (maximum if start_level is None else start_level) + 1:
+                raise ValueError("num_levels exceeds the available RAPTOR depth")
 
     def _retrieve_flat(self, query: str, *, top_k: int) -> list[Document]:
-        # Ask the vector store for every node before applying our stable
-        # tie-break. NumPy's reverse argsort otherwise makes equal-score order
-        # depend on insertion position.
-        docs = self.retriever.retrieve(query, top_k=len(self._nodes_by_id))
-        docs.sort(key=lambda doc: (-self._finite_score(doc.score), doc.doc_id or ""))
+        embeddings = self.store.embeddings
+        if embeddings is None:
+            return []
+        ids = list(self._nodes_by_id)
+        positions = [self._node_positions[node_id] for node_id in ids]
+        scores = cosine_similarity(self.embedding_model.embed_query(query), embeddings[positions])
+        ranked = sorted(zip(ids, scores), key=lambda pair: (-self._finite_score(pair[1]), pair[0]))
         results: list[Document] = []
-        for doc in docs[:top_k]:
-            node_id = doc.doc_id or ""
+        for node_id, score in ranked[:top_k]:
             path = self._canonical_path(node_id)
-            output = _snapshot_document(doc)
+            output = self._nodes_by_id[node_id].to_document()
+            output.score = self._finite_score(score)
             output.metadata.update(
                 {
                     "retrieval_method": "raptor",
@@ -484,6 +680,17 @@ class RAPTOREngine:
 
     Unlike the legacy ``RAPTORRetriever`` class, this engine avoids mandatory
     clustering dependencies and exposes an end-to-end ``ask`` API.
+
+    ``clustering_mode="umap_gmm"`` enables the paper's overlapping global/local
+    clustering. Supply semantic embeddings and an abstractive LLM for meaningful
+    summaries. The default hashing encoder and extractive client are baselines.
+    ``summary_input_token_budget`` bounds the entire summary prompt
+    using the injected tokenizer (an approximation by default). Oversized groups
+    are reclustered; non-shrinking splits use deterministic bisection. A single
+    oversized node raises instead of silently losing source content.
+    ``summary_max_tokens`` is forwarded to the summarization provider (100 by
+    default as in the reference implementation). Supply an actual tokenizer
+    and a provider that enforces its output limit for model-accurate accounting.
     """
 
     def __init__(
@@ -498,6 +705,15 @@ class RAPTOREngine:
         retrieval_mode: str = "flat",
         beam_width: int = 4,
         traversal_budget: int = 64,
+        clustering_mode: str = "greedy",
+        clustering_config: RAPTORClusteringConfig | None = None,
+        summary_input_token_budget: int = 3500,
+        max_recluster_depth: int = 8,
+        retrieval_token_budget: int | None = None,
+        token_estimator: Callable[[str], int] = approximate_token_count,
+        summary_max_tokens: int = 100,
+        start_level: int | None = None,
+        num_levels: int | None = None,
         **engine_kwargs: Any,
     ):
         self.levels = _validate_non_negative_int(levels, name="levels")
@@ -517,6 +733,24 @@ class RAPTOREngine:
             raise TypeError("llm_client must define generate()")
         self.branching_factor = branching_factor
         self.min_cluster_size = min_cluster_size
+        if not isinstance(clustering_mode, str):
+            raise TypeError("clustering_mode must be a string")
+        if clustering_mode not in {"greedy", "umap_gmm"}:
+            raise ValueError("clustering_mode must be 'greedy' or 'umap_gmm'")
+        if clustering_config is not None and not isinstance(clustering_config, RAPTORClusteringConfig):
+            raise TypeError("clustering_config must be a RAPTORClusteringConfig or None")
+        if clustering_config is not None and clustering_mode != "umap_gmm":
+            raise ValueError("clustering_config requires clustering_mode='umap_gmm'")
+        if not callable(token_estimator):
+            raise TypeError("token_estimator must be callable")
+        self.token_estimator = token_estimator
+        self.summary_input_token_budget = _validate_top_k(
+            summary_input_token_budget, name="summary_input_token_budget",
+        )
+        self.summary_max_tokens = _validate_top_k(summary_max_tokens, name="summary_max_tokens")
+        self.max_recluster_depth = _validate_non_negative_int(max_recluster_depth, name="max_recluster_depth")
+        self.clustering_mode = clustering_mode
+        self.clusterer = UMAPGMMClusterer(clustering_config) if clustering_mode == "umap_gmm" else None
         self.index = self.build_index(list(documents))
         self.retriever = RAPTORRetrieverV2(
             self.index,
@@ -524,6 +758,10 @@ class RAPTOREngine:
             retrieval_mode=retrieval_mode,
             beam_width=beam_width,
             traversal_budget=traversal_budget,
+            retrieval_token_budget=retrieval_token_budget,
+            token_estimator=token_estimator,
+            start_level=start_level,
+            num_levels=num_levels,
         )
         self.engine = RAGEngine(self.retriever, llm_client=self.llm_client, top_k=top_k, **engine_kwargs)
 
@@ -531,12 +769,32 @@ class RAPTOREngine:
     def from_documents(cls, documents: Iterable[Document], **kwargs: Any) -> "RAPTOREngine":
         return cls(documents, **kwargs)
 
-    def ask(self, query: str, top_k: int | None = None, **generate_kwargs: Any) -> RAGResponse:
+    def ask(self, query: str, top_k: int | None = None, *, allowed_doc_ids: Iterable[str] | None = None,
+            principal: Principal | Mapping[str, Any] | None = None, access_policy: AccessPolicy | None = None,
+            tenant_id: str | None = None, collection_id: str | None = None, **generate_kwargs: Any) -> RAGResponse:
         query = _validate_query(query)
         if top_k is not None:
             top_k = _validate_top_k(top_k)
-        response = self.engine.ask(query, top_k=top_k, **generate_kwargs)
-        response.metadata.update({"architecture": "raptor", "raptor_index": self.index.to_dict()})
+        retriever = self.retriever
+        scoped = any(value is not None for value in (allowed_doc_ids, principal, access_policy, tenant_id, collection_id))
+        if scoped:
+            if not callable(getattr(retriever, "scoped", None)):
+                raise ValueError("apply native RAPTOR scopes before wrapping its retriever")
+            retriever = retriever.scoped(allowed_doc_ids=allowed_doc_ids, principal=principal, access_policy=access_policy,
+                                         tenant_id=tenant_id, collection_id=collection_id)
+        engine = copy(self.engine)
+        # Wrappers replace this object's retriever. Reusing the original inner
+        # engine directly would silently bypass that authorization boundary.
+        engine.retriever = retriever
+        response = engine.ask(query, top_k=top_k, **generate_kwargs)
+        response.metadata.update({
+            "architecture": "raptor",
+            "raptor_clustering_mode": self.clustering_mode,
+        })
+        if retriever is self.engine.retriever:
+            response.metadata["raptor_index"] = self.index.to_dict()
+        else:
+            response.metadata["access_control_enabled"] = True
         return response
 
     def retrieve(
@@ -547,6 +805,14 @@ class RAPTOREngine:
         retrieval_mode: str | None = None,
         beam_width: int | None = None,
         traversal_budget: int | None = None,
+        retrieval_token_budget: int | None = None,
+        start_level: int | None = None,
+        num_levels: int | None = None,
+        allowed_doc_ids: Iterable[str] | None = None,
+        principal: Principal | Mapping[str, Any] | None = None,
+        access_policy: AccessPolicy | None = None,
+        tenant_id: str | None = None,
+        collection_id: str | None = None,
     ) -> list[Document]:
         top_k = _validate_top_k(top_k)
         return self.retriever.retrieve(
@@ -555,6 +821,11 @@ class RAPTOREngine:
             retrieval_mode=retrieval_mode,
             beam_width=beam_width,
             traversal_budget=traversal_budget,
+            retrieval_token_budget=retrieval_token_budget,
+            start_level=start_level,
+            num_levels=num_levels,
+            allowed_doc_ids=allowed_doc_ids, principal=principal, access_policy=access_policy,
+            tenant_id=tenant_id, collection_id=collection_id,
         )
 
     def build_index(self, documents: list[Document]) -> RAPTORIndex:
@@ -582,10 +853,12 @@ class RAPTOREngine:
             if len(current) < self.min_cluster_size:
                 break
             groups = self._group_nodes(current)
+            groups = [bounded for group in groups for bounded in self._bound_summary_group(group)]
+            groups = list({tuple(node.document.doc_id for node in group): group for group in groups}.values())
             next_level: list[RAPTORNode] = []
             for cluster_idx, group in enumerate(groups):
-                if len(group) < self.min_cluster_size:
-                    continue
+                # A soft-GMM cluster may contain one leaf. Discarding it loses
+                # that leaf from all coarser summaries and level-restricted search.
                 summary = self._summarize_group(group)
                 child_ids = [node.document.doc_id for node in group if node.document.doc_id]
                 summary_id = f"raptor::L{level}::C{cluster_idx}"
@@ -594,7 +867,10 @@ class RAPTOREngine:
                 used_ids.add(summary_id)
                 doc = Document(
                     summary,
-                    metadata={"raptor_level": level, "node_type": "summary", "raptor_child_ids": child_ids},
+                    metadata={
+                        "raptor_level": level, "node_type": "summary", "raptor_child_ids": child_ids,
+                        "raptor_clustering_mode": self.clustering_mode,
+                    },
                     doc_id=summary_id,
                 )
                 summary_node = RAPTORNode(doc, level=level, child_ids=child_ids, cluster_id=f"L{level}-{cluster_idx}")
@@ -602,10 +878,19 @@ class RAPTOREngine:
                 next_level.append(summary_node)
             if not next_level:
                 break
+            if len(next_level) >= len(current):
+                # Soft memberships may expand rather than compress a layer.
+                # Keep the useful summaries, but do not repeatedly expand them.
+                break
             current = next_level
         return index
 
     def _group_nodes(self, nodes: list[RAPTORNode]) -> list[list[RAPTORNode]]:
+        if self.clusterer is not None:
+            paper_matrix = self.embedding_model.embed_documents([node.document.content for node in nodes])
+            if len(paper_matrix) != len(nodes):
+                raise ValueError("embedding_model returned a different number of rows than RAPTOR nodes")
+            return [[nodes[index] for index in indices] for indices in self.clusterer.cluster(paper_matrix)]
         if len(nodes) <= self.branching_factor:
             return [nodes]
         # Greedy similarity grouping. This avoids sklearn while still grouping
@@ -640,17 +925,55 @@ class RAPTOREngine:
             groups.append([nodes[idx] for idx in group_indices])
         return groups
 
-    def _summarize_group(self, group: list[RAPTORNode]) -> str:
-        context = "\n\n---\n\n".join(
+    def _bound_summary_group(self, group: list[RAPTORNode], depth: int = 0) -> list[list[RAPTORNode]]:
+        if _count_tokens(self.token_estimator, self._summary_prompt(group)) <= self.summary_input_token_budget:
+            return [group]
+        if len(group) == 1:
+            raise ValueError(
+                f"RAPTOR node {group[0].document.doc_id!r} exceeds summary_input_token_budget; "
+                "split source documents into smaller chunks or increase the budget"
+            )
+        if depth < self.max_recluster_depth:
+            subsets = self._group_nodes(group)
+            if subsets and all(len(subset) < len(group) for subset in subsets):
+                return [bounded for subset in subsets for bounded in self._bound_summary_group(subset, depth + 1)]
+        # Guarantee termination even when GMM assigns all rows to one cluster,
+        # or soft clusters do not contract. Every child remains represented.
+        middle = len(group) // 2
+        return [
+            bounded
+            for subset in (group[:middle], group[middle:])
+            for bounded in self._bound_summary_group(subset, self.max_recluster_depth)
+        ]
+
+    @staticmethod
+    def _summary_context(group: list[RAPTORNode]) -> str:
+        return "\n\n---\n\n".join(
             f"[{node.document.doc_id or i}]\n{node.document.content}" for i, node in enumerate(group, start=1)
         )
-        if len(context) > 9000:
-            context = context[:9000] + "\n..."
+
+    def _summary_prompt(self, group: list[RAPTORNode]) -> str:
+        return SUMMARY_PROMPT.format(context=self._summary_context(group))
+
+    def _summarize_group(self, group: list[RAPTORNode]) -> str:
+        context = self._summary_context(group)
         prompt = SUMMARY_PROMPT.format(context=context)
-        generated = self.llm_client.generate(prompt)
+        generated = self.llm_client.generate(prompt, max_tokens=self.summary_max_tokens)
         if not isinstance(generated, str):
             raise TypeError("llm_client.generate() must return a string")
-        return generated.strip() or "\n".join(node.document.content[:400] for node in group)
+        if self.clusterer is not None and not generated.strip():
+            raise ValueError("llm_client.generate() returned an empty RAPTOR summary")
+        summary = generated.strip() or "\n".join(node.document.content[:400] for node in group)
+        if _count_tokens(self.token_estimator, summary) > self.summary_max_tokens:
+            raise ValueError("RAPTOR summary exceeds summary_max_tokens")
+        return summary
+
+
+def _count_tokens(estimator: Callable[[str], int], text: str) -> int:
+    count = _validate_non_negative_int(estimator(text), name="token_estimator result")
+    if text.strip() and not count:
+        raise ValueError("token_estimator must be positive for non-empty text")
+    return count
 
 
 def _validate_query(query: Any) -> str:

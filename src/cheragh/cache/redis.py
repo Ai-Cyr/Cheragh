@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import time
+from base64 import urlsafe_b64encode
 from typing import Any
 
 from .base import CacheBackend, CacheEntry, CacheSerializerError, dumps_entry, loads_entry
@@ -13,6 +14,12 @@ class RedisCache(CacheBackend):
 
     The redis dependency is optional. Install it separately or through the
     package extra: ``pip install cheragh[redis]``.
+
+    Keys use a versioned encoding of prefix, namespace, and key so delimiters
+    or glob characters cannot cross namespace boundaries. Upgrading creates a
+    cold cache: legacy ``prefix:namespace:key`` entries are deliberately not
+    read, rewritten, or deleted. Let their TTL expire or remove them through a
+    separately reviewed operational cleanup after old workers are stopped.
     """
 
     def __init__(
@@ -60,12 +67,12 @@ class RedisCache(CacheBackend):
             )
 
     def _redis_key(self, namespace: str, key: str) -> str:
-        return f"{self.key_prefix}:{namespace}:{key}"
+        return f"cheragh:v2:{_key_component(self.key_prefix)}:{_key_component(namespace)}:{_key_component(key)}"
 
     def _pattern(self, namespace: str | None = None) -> str:
-        prefix = _escape_redis_glob(self.key_prefix)
-        ns = _escape_redis_glob(namespace) if namespace is not None else "*"
-        return f"{prefix}:{ns}:*"
+        prefix = _key_component(self.key_prefix)
+        ns = _key_component(namespace) if namespace is not None else "*"
+        return f"cheragh:v2:{prefix}:{ns}:*"
 
     def _get_entry(self, namespace: str, key: str) -> CacheEntry | None:
         raw = self.client.get(self._redis_key(namespace, key))
@@ -82,8 +89,9 @@ class RedisCache(CacheBackend):
                 raise CacheSerializerError("cache entry identity does not match its Redis key")
             return entry
         except Exception:
-            # Remove poisoned data after surfacing the error to the base layer.
-            self.client.delete(self._redis_key(namespace, key))
+            # A concurrent writer may have replaced the poisoned value since
+            # our read. Delete only the exact payload that failed validation.
+            self._delete_if_matches(self._redis_key(namespace, key), raw)
             raise
 
     def _set_entry(self, entry: CacheEntry) -> None:
@@ -116,12 +124,15 @@ class RedisCache(CacheBackend):
             secret_key=self.secret_key,
             allow_pickle=self.allow_pickle,
         )
+        self._delete_if_matches(self._redis_key(namespace, key), expected)
+
+    def _delete_if_matches(self, redis_key: str, expected: bytes) -> None:
         script = (
             "if redis.call('get', KEYS[1]) == ARGV[1] "
             "then return redis.call('del', KEYS[1]) else return 0 end"
         )
         try:
-            self.client.eval(script, 1, self._redis_key(namespace, key), expected)
+            self.client.eval(script, 1, redis_key, expected)
         except Exception:  # pragma: no cover - optional/fake client behavior
             return
 
@@ -153,16 +164,7 @@ class RedisCache(CacheBackend):
         return removed
 
 
-def _escape_redis_glob(value: str) -> str:
-    """Escape Redis glob metacharacters used by SCAN MATCH.
+def _key_component(value: str) -> str:
+    """Encode a complete identity component using a glob- and delimiter-free alphabet."""
 
-    Namespace text remains unchanged in actual keys; only invalidation patterns
-    are escaped, preserving compatibility with already persisted entries.
-    """
-
-    escaped: list[str] = []
-    for character in str(value):
-        if character in {"*", "?", "[", "]", "\\"}:
-            escaped.append("\\")
-        escaped.append(character)
-    return "".join(escaped)
+    return urlsafe_b64encode(str(value).encode("utf-8")).decode("ascii")

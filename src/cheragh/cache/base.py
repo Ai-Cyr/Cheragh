@@ -26,7 +26,7 @@ import math
 import pickle
 import threading
 import time
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Iterator, Mapping
 
 SCHEMA_VERSION = 1
 _HMAC_PREFIX = b"ARAGC1-HMAC\n"
@@ -94,34 +94,50 @@ class CacheEntry:
 
 
 def make_cache_key(*parts: Any, prefix: str | None = None) -> str:
-    """Build a stable SHA256 cache key from arbitrary Python objects."""
+    """Build a stable, type-aware SHA256 key from Python objects.
 
-    digest = hashlib.sha256()
-    if prefix:
-        digest.update(str(prefix).encode("utf-8"))
-        digest.update(b"\x00")
+    The v2 encoding uses length-prefixed components rather than separators,
+    which may also appear in caller-controlled values. Keys from the older
+    ambiguous encoding intentionally produce cold cache misses after upgrade.
+    """
+
+    digest = hashlib.sha256(b"cheragh-cache-key-v2\x00")
+    digest.update(_stable_bytes(prefix))
     for part in parts:
         digest.update(_stable_bytes(part))
-        digest.update(b"\x1f")
     return digest.hexdigest()
 
 
+def _key_frame(kind: bytes, payload: bytes) -> bytes:
+    return kind + str(len(payload)).encode("ascii") + b":" + payload
+
+
 def _stable_bytes(value: Any) -> bytes:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return repr(value).encode("utf-8")
+    if value is None:
+        return _key_frame(b"n", b"")
+    if isinstance(value, bool):
+        return _key_frame(b"b", b"1" if value else b"0")
+    if isinstance(value, str):
+        return _key_frame(b"s", value.encode("utf-8"))
+    if isinstance(value, int):
+        return _key_frame(b"i", str(value).encode("ascii"))
+    if isinstance(value, float):
+        return _key_frame(b"f", repr(value).encode("ascii"))
     if isinstance(value, bytes):
-        return value
+        return _key_frame(b"y", value)
     if isinstance(value, Mapping):
-        items = sorted((str(k), _stable_bytes(v)) for k, v in value.items())
-        return b"{" + b",".join(k.encode("utf-8") + b":" + v for k, v in items) + b"}"
-    if isinstance(value, (list, tuple, set, frozenset)):
-        iterable: Iterable[Any] = value if not isinstance(value, (set, frozenset)) else sorted(value, key=repr)
-        return b"[" + b",".join(_stable_bytes(v) for v in iterable) + b"]"
+        items = sorted((_stable_bytes(k), _stable_bytes(v)) for k, v in value.items())
+        return _key_frame(b"m", b"".join(key + item for key, item in items))
+    if isinstance(value, (list, tuple)):
+        return _key_frame(b"l" if isinstance(value, list) else b"t", b"".join(_stable_bytes(v) for v in value))
+    if isinstance(value, (set, frozenset)):
+        items = sorted(_stable_bytes(v) for v in value)
+        return _key_frame(b"e" if isinstance(value, set) else b"r", b"".join(items))
     # NumPy arrays and dataclasses are supported through pickle hashing.
     try:
-        return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        return _key_frame(b"p", pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
     except Exception:
-        return repr(value).encode("utf-8")
+        return _key_frame(b"o", repr(value).encode("utf-8"))
 
 
 def dumps_entry(
@@ -190,7 +206,13 @@ def _json_safe_encode(value: Any) -> Any:
     if isinstance(value, bytes):
         return {"__cheragh_type__": "bytes", "data": base64.b64encode(value).decode("ascii")}
     if isinstance(value, Mapping):
-        return {str(k): _json_safe_encode(v) for k, v in value.items()}
+        encoded = {str(k): _json_safe_encode(v) for k, v in value.items()}
+        # A user's ordinary dictionary may contain our reserved discriminator.
+        # Escape it so decoding does not reinterpret metadata as a Document,
+        # array or byte string. Older unambiguous entries remain readable.
+        if "__cheragh_type__" in encoded:
+            return {"__cheragh_type__": "mapping", "items": encoded}
+        return encoded
     if isinstance(value, (list, tuple)):
         return [_json_safe_encode(v) for v in value]
     if isinstance(value, (set, frozenset)):
@@ -228,6 +250,8 @@ def _json_safe_decode(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
     marker = value.get("__cheragh_type__")
+    if marker == "mapping":
+        return {k: _json_safe_decode(v) for k, v in value["items"].items()}
     if marker == "bytes":
         return base64.b64decode(value["data"].encode("ascii"))
     if marker == "ndarray":

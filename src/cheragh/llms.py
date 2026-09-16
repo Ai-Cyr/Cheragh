@@ -11,7 +11,8 @@ from numbers import Real
 from typing import Any, Iterator, Optional
 from urllib import request
 
-from .base import LLMClient, OpenAILLMClient
+from .base import LLMClient, OpenAILLMClient, _iter_chat_completion_text
+from .generation import ConfidenceDraft, chat_completion_draft
 
 
 def _validate_timeout_seconds(value: object) -> float:
@@ -25,6 +26,24 @@ def _validate_timeout_seconds(value: object) -> float:
 
 class OpenAIChatClient(OpenAILLMClient):
     """Alias around :class:`cheragh.base.OpenAILLMClient` for clearer naming."""
+
+    def generate_with_confidence(self, prompt: str, temperature: float = 0.0, **kwargs: Any) -> ConfidenceDraft:
+        """Return generation-time logprobs for FLARE with a supporting model.
+
+        Unsupported models or absent logprobs fail explicitly. No mutable
+        last-response cache is used, so concurrent requests cannot mix drafts.
+        """
+        if any(key in kwargs for key in ("stream", "n", "logprobs")):
+            raise ValueError("Confidence generation controls stream, n and logprobs")
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            logprobs=True,
+            n=1,
+            **kwargs,
+        )
+        return chat_completion_draft(response)
 
 
 class AzureOpenAIChatClient(LLMClient):
@@ -73,10 +92,7 @@ class AzureOpenAIChatClient(LLMClient):
             stream=True,
             **kwargs,
         )
-        for event in stream:  # pragma: no cover - provider integration
-            chunk = event.choices[0].delta.content
-            if chunk:
-                yield chunk
+        yield from _iter_chat_completion_text(stream)
 
 
 class AnthropicClient(LLMClient):
@@ -142,16 +158,14 @@ class LiteLLMClient(LLMClient):
 
     def stream(self, prompt: str, temperature: float = 0.0, **kwargs: Any) -> Iterator[str]:
         params = {**self.default_kwargs, **kwargs}
-        for event in self.litellm.completion(
+        stream = self.litellm.completion(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
             stream=True,
             **params,
-        ):  # pragma: no cover - provider integration
-            chunk = event.choices[0].delta.content
-            if chunk:
-                yield chunk
+        )
+        yield from _iter_chat_completion_text(stream)
 
 
 class OllamaClient(LLMClient):

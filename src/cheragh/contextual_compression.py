@@ -15,6 +15,7 @@ C'est un "filtre LLM" placé entre le retriever et le générateur.
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import List
 
 from .base import BaseRetriever, Document, LLMClient, _validate_top_k
@@ -61,6 +62,8 @@ class ContextualCompressionRetriever(BaseRetriever):
         llm_client: LLMClient,
         drop_empty: bool = True,
         min_compressed_length: int = 20,
+        *,
+        validate_extraction: bool = True,
     ):
         self.base_retriever = base_retriever
         self.llm_client = llm_client
@@ -72,6 +75,9 @@ class ContextualCompressionRetriever(BaseRetriever):
             raise ValueError("min_compressed_length must be >= 0")
         self.drop_empty = drop_empty
         self.min_compressed_length = min_compressed_length
+        if not isinstance(validate_extraction, bool):
+            raise TypeError("validate_extraction must be a boolean")
+        self.validate_extraction = validate_extraction
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
         top_k = _validate_top_k(top_k)
@@ -85,11 +91,20 @@ class ContextualCompressionRetriever(BaseRetriever):
             compressed_content = self.llm_client.generate(prompt).strip()
 
             is_empty = (
-                "NO_OUTPUT" in compressed_content
+                compressed_content == "NO_OUTPUT"
                 or len(compressed_content) < self.min_compressed_length
             )
             if is_empty and self.drop_empty:
                 continue
+            if not is_empty and self.validate_extraction:
+                # An extractor must not convert generated paraphrases into
+                # apparently verbatim evidence or drop a sentence's negation.
+                source_sentences = {re.sub(r"\s+", " ", sentence).strip() for sentence in
+                                    re.split(r"(?<=[.!?。！？])\s+", doc.content) if sentence.strip()}
+                extracted = [re.sub(r"\s+", " ", sentence).strip() for sentence in
+                             re.split(r"(?<=[.!?。！？])\s+", compressed_content) if sentence.strip()]
+                if any(sentence not in source_sentences for sentence in extracted):
+                    raise ValueError("Context compression must preserve complete source sentences verbatim")
 
             compressed_docs.append(
                 Document(
@@ -99,6 +114,7 @@ class ContextualCompressionRetriever(BaseRetriever):
                         "original_length": len(doc.content),
                         "compressed_length": len(compressed_content),
                         "was_compressed": not is_empty,
+                        "extraction_verified": self.validate_extraction and not is_empty,
                     },
                     doc_id=doc.doc_id,
                     score=doc.score,

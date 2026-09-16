@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import hashlib
 import re
+from copy import deepcopy
 from typing import Dict, List, Optional
 
 import numpy as np
 
-from .base import BaseRetriever, Document, EmbeddingModel, _validate_top_k, cosine_similarity
+from .base import BaseRetriever, Document, EmbeddingModel, _snapshot_documents, _validate_top_k, _validate_non_negative_int, cosine_similarity
 from .cache import hash_documents, embedder_fingerprint, load_cache, save_cache
 
 
@@ -25,6 +26,8 @@ class ParentDocumentRetriever(BaseRetriever):
         cache_path: Optional[str] = None,
         allow_unsafe_pickle: bool = False,
     ):
+        _validate_top_k(child_chunk_size, name="child_chunk_size")
+        _validate_non_negative_int(child_chunk_overlap, name="child_chunk_overlap")
         if child_chunk_overlap >= child_chunk_size:
             raise ValueError("child_chunk_overlap doit être < child_chunk_size.")
 
@@ -36,7 +39,7 @@ class ParentDocumentRetriever(BaseRetriever):
 
         # S'assurer que chaque parent a un id STABLE (sinon le hash change à chaque run)
         self.parent_documents: Dict[str, Document] = {}
-        for p in parent_documents:
+        for p in _snapshot_documents(parent_documents):
             if p.doc_id is None:
                 # Python's hash() is salted per process; SHA-256 keeps cache and
                 # child identifiers stable across restarts and machines.
@@ -60,8 +63,7 @@ class ParentDocumentRetriever(BaseRetriever):
         query_vec = self.embedding_model.embed_query(query)
         scores = cosine_similarity(query_vec, self.child_embeddings)
 
-        candidate_count = max(top_k * 3, 20)
-        top_child_idx = np.argsort(scores)[::-1][:candidate_count]
+        top_child_idx = np.argsort(-scores, kind="stable")
 
         seen_parents: Dict[str, float] = {}
         parent_order: List[str] = []
@@ -81,7 +83,7 @@ class ParentDocumentRetriever(BaseRetriever):
             results.append(
                 Document(
                     content=parent.content,
-                    metadata={**parent.metadata, "best_child_score": seen_parents[pid]},
+                    metadata={**deepcopy(parent.metadata), "best_child_score": seen_parents[pid]},
                     doc_id=parent.doc_id,
                     score=seen_parents[pid],
                 )

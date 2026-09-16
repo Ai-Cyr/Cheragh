@@ -6,10 +6,12 @@ conversation context, and stores assistant answers for subsequent turns.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from time import time
 from typing import Any
 
 from ..engine import RAGEngine, RAGResponse
+from ..base import LLMClient, _validate_non_negative_int
 
 
 @dataclass
@@ -41,7 +43,10 @@ class InMemoryConversationStore:
 
     def get(self, session_id: str, limit: int | None = None) -> list[ConversationTurn]:
         turns = list(self._sessions.get(session_id, []))
-        return turns[-limit:] if limit else turns
+        if limit is not None:
+            _validate_non_negative_int(limit, name="limit")
+            return deepcopy(turns[-limit:]) if limit else []
+        return deepcopy(turns)
 
     def clear(self, session_id: str | None = None) -> None:
         if session_id is None:
@@ -64,10 +69,13 @@ class ConversationalRAGEngine:
         condense_followups: bool = True,
         include_history_in_query: bool = True,
         session_id: str = "default",
+        *,
+        query_rewriter: LLMClient | None = None,
     ):
         self.engine = engine
         self.memory = memory or InMemoryConversationStore()
-        self.max_history_turns = max(0, max_history_turns)
+        self.max_history_turns = _validate_non_negative_int(max_history_turns, name="max_history_turns")
+        self.query_rewriter = query_rewriter
         self.condense_followups = condense_followups
         self.include_history_in_query = include_history_in_query
         self.default_session_id = session_id
@@ -121,6 +129,19 @@ class ConversationalRAGEngine:
     def _standalone_query(self, query: str, history: list[ConversationTurn]) -> str:
         if not self.condense_followups or not history or not self.include_history_in_query:
             return query
+        if self.query_rewriter is not None:
+            prompt = (
+                "Rewrite the latest user question as one self-contained retrieval question. "
+                "Resolve pronouns and omitted entities using this conversation, preserve constraints and language, "
+                "and do not answer the question or add facts from earlier assistant answers as assumptions. "
+                "If the latest question already stands alone, return it unchanged. Return only the rewritten question.\n"
+                + "\n".join(f"User: {turn.user}\nAssistant: {turn.assistant}" for turn in history)
+                + f"\nLatest user question: {query}\nStandalone question:"
+            )
+            rewritten = self.query_rewriter.generate(prompt).strip()
+            if not rewritten:
+                raise ValueError("Conversational query rewriter returned an empty question")
+            return rewritten
         if not _looks_like_followup(query):
             # Still include a compact context line for better continuity, but
             # keep the new user query dominant.

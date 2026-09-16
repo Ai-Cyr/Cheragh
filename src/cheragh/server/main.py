@@ -11,7 +11,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8000,
     *,
-    enable_indexing: bool = False,
+    enable_indexing: bool | None = None,
     allowed_index_root: str | Path | None = None,
     api_key: str | None = None,
     require_auth: bool | None = None,
@@ -29,7 +29,22 @@ def serve(
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError("Serving requires uvicorn. Install with: pip install cheragh[fastapi]") from exc
 
-    from .app import create_app
+    from .app import _positive_int, create_app
+
+    # Validate listener settings before loading a potentially expensive index
+    # or initializing provider clients.
+    if not isinstance(host, str) or not host.strip():
+        raise ValueError("host must be a non-empty string")
+    port = _positive_int(port, "port")
+    if port > 65_535:
+        raise ValueError("port must be <= 65535")
+    max_concurrent_operations = _positive_int(max_concurrent_operations, "max_concurrent_operations")
+    if (
+        isinstance(max_server_connections, bool)
+        or not isinstance(max_server_connections, int)
+        or max_server_connections <= max_concurrent_operations
+    ):
+        raise ValueError("max_server_connections must be an integer greater than max_concurrent_operations")
 
     # Anonymous local development remains compatible. A non-loopback bind is
     # fail-closed unless the caller explicitly made another trust decision.
@@ -49,12 +64,6 @@ def serve(
         index_timeout_seconds=index_timeout_seconds,
         stream_max_duration_seconds=stream_max_duration_seconds,
     )
-    if (
-        isinstance(max_server_connections, bool)
-        or not isinstance(max_server_connections, int)
-        or max_server_connections <= max_concurrent_operations
-    ):
-        raise ValueError("max_server_connections must be an integer greater than max_concurrent_operations")
     uvicorn.run(
         app,
         host=host,

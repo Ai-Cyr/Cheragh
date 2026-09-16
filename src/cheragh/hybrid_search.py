@@ -28,16 +28,15 @@ if TYPE_CHECKING:  # pragma: no cover
 class HybridSearchRetriever(BaseRetriever):
     """Hybrid BM25 + dense retriever, with disk cache support.
 
-    ``rank-bm25`` is used when available. Otherwise the package falls back to a
-    small built-in BM25 implementation so the retriever remains usable in a
-    standard Python environment with only NumPy installed.
+    The built-in BM25 uses positive Robertson/Lucene IDF. Installing an optional
+    library never silently changes the IDF formula or ranking of the corpus.
 
     v0.9 adds a reusable unicode tokenizer and richer metadata filters. Filters
     can be supplied at construction time and refined per query with
     ``retrieve(..., filters={...})``.
     """
 
-    _CACHEABLE_VERSION = 4
+    _CACHEABLE_VERSION = 5
 
     def __init__(
         self,
@@ -79,12 +78,16 @@ class HybridSearchRetriever(BaseRetriever):
         query_vec = self.embedding_model.embed_query(query)
         dense_scores = cosine_similarity(query_vec, self.doc_embeddings)
 
-        bm25_norm = min_max_normalize(bm25_scores)
-        dense_norm = min_max_normalize(dense_scores)
+        # Calibrate on the eligible candidate set. Otherwise an inaccessible
+        # outlier can change the balance of the two branches for this query.
+        bm25_norm = np.zeros_like(bm25_scores)
+        dense_norm = np.zeros_like(dense_scores)
+        bm25_norm[candidate_indices] = min_max_normalize(bm25_scores[candidate_indices])
+        dense_norm[candidate_indices] = min_max_normalize(dense_scores[candidate_indices])
         hybrid_scores = self.alpha * dense_norm + (1.0 - self.alpha) * bm25_norm
 
         candidate_scores = hybrid_scores[candidate_indices]
-        order = np.argsort(candidate_scores)[::-1][:top_k]
+        order = np.argsort(-candidate_scores, kind="stable")[:top_k]
         results: List[Document] = []
         for local_i in order:
             i = candidate_indices[int(local_i)]
@@ -93,7 +96,7 @@ class HybridSearchRetriever(BaseRetriever):
                 Document(
                     content=doc.content,
                     metadata={
-                        **doc.metadata,
+                        **deepcopy(doc.metadata),
                         "bm25_score": float(bm25_norm[i]),
                         "dense_score": float(dense_norm[i]),
                     },
@@ -220,7 +223,7 @@ class BM25Retriever(BaseRetriever):
 
 
 class _SimpleBM25:
-    """Minimal BM25Okapi-compatible scorer used as a dependency-free fallback."""
+    """BM25 scorer with positive IDF log(1 + (N-df+0.5)/(df+0.5))."""
 
     def __init__(self, tokenized_corpus: Sequence[Sequence[str]], k1: float = 1.5, b: float = 0.75):
         np = _numpy()
@@ -260,14 +263,7 @@ def _build_bm25(
     k1: float = 1.5,
     b: float = 0.75,
 ):
-    if not tokenized_corpus:
-        return _SimpleBM25(tokenized_corpus, k1=k1, b=b)
-    try:  # pragma: no cover - depends on optional dependency
-        from rank_bm25 import BM25Okapi
-
-        return BM25Okapi(tokenized_corpus, k1=k1, b=b)
-    except ImportError:
-        return _SimpleBM25(tokenized_corpus, k1=k1, b=b)
+    return _SimpleBM25(tokenized_corpus, k1=k1, b=b)
 
 
 def _merge_filters(base: Optional[dict[str, Any]], extra: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:

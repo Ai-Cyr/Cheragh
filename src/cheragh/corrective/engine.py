@@ -293,6 +293,11 @@ class CorrectiveRAGEngine:
     ``refine(query, documents)``, or a callable with that signature.  All
     collaborator boundaries receive snapshots and all returned documents are
     validated and copied before use.
+
+    ``preserve_correction_sources=True`` follows the paper's union of refined
+    internal and external evidence for Ambiguous. In that mode ``top_k`` bounds
+    each retrieval, not the combined reader context; the base engine's context
+    packer still enforces the configured reader budget.
     """
 
     def __init__(
@@ -311,6 +316,7 @@ class CorrectiveRAGEngine:
         external_top_k: int | None = None,
         knowledge_refiner: KnowledgeRefiner | Callable[[str, Sequence[Document]], list[Document]] | str | None = None,
         incorrect_context_score: float = 0.0,
+        preserve_correction_sources: bool = False,
     ):
         max_retries = _validate_non_negative_int(max_retries, name="max_retries")
         min_context_score = _probability(min_context_score, name="min_context_score")
@@ -325,6 +331,8 @@ class CorrectiveRAGEngine:
             raise TypeError("fallback_answer must be a str")
         if not isinstance(return_details, bool):
             raise TypeError("return_details must be a bool")
+        if not isinstance(preserve_correction_sources, bool):
+            raise TypeError("preserve_correction_sources must be a bool")
         if retrieval_grader is not None and not (
             callable(retrieval_grader) or callable(getattr(retrieval_grader, "grade", None))
         ):
@@ -381,6 +389,7 @@ class CorrectiveRAGEngine:
         self.external_retriever = external_retriever
         self.external_top_k = external_top_k
         self.knowledge_refiner = knowledge_refiner
+        self.preserve_correction_sources = preserve_correction_sources
 
     def ask(self, query: str, top_k: int | None = None, **kwargs: Any) -> RAGResponse | CorrectiveRAGResult:
         query = _validate_user_query(query)
@@ -562,20 +571,21 @@ class CorrectiveRAGEngine:
                 trigger_action=action,
             )
 
+        correction_limit = max(1, len(primary) + len(external)) if self.preserve_correction_sources else top_k
         if action is RetrievalAction.CORRECT:
             corrected = primary
         elif action is RetrievalAction.AMBIGUOUS:
             # The corrective source goes first so it is not silently discarded
             # when a caller requests a one-document context.
-            corrected = _interleave_unique(external, primary, limit=top_k)
+            corrected = _interleave_unique(external, primary, limit=correction_limit)
         else:
-            corrected = external[:top_k]
+            corrected = external[:correction_limit]
 
         refined = self.knowledge_refiner is not None and bool(corrected)
         if refined:
-            corrected = self._refine(query, corrected, limit=top_k)
+            corrected = self._refine(query, corrected, limit=correction_limit)
         else:
-            corrected = _snapshot_documents(corrected[:top_k])
+            corrected = _snapshot_documents(corrected[:correction_limit])
 
         changed = refined or bool(external)
         final_grade = self._grade(query, corrected) if changed else initial_grade
@@ -670,6 +680,8 @@ class CorrectiveRAGEngine:
         top_k: int,
         generate_kwargs: dict[str, Any],
     ) -> RAGResponse:
+        if self.preserve_correction_sources:
+            top_k = max(top_k, len(documents))
         engine = RAGEngine(
             retriever=_SnapshotRetriever(documents),
             llm_client=self.llm_client,
@@ -680,6 +692,7 @@ class CorrectiveRAGEngine:
             require_citations=self.base_engine.require_citations,
             flag_unsourced_sentences=self.base_engine.flag_unsourced_sentences,
             compressor=self.base_engine.compressor,
+            context_packer=self.base_engine.context_packer,
             query_transformer=None,
             trace_enabled=self.base_engine.trace_enabled,
             cache_backend=self.base_engine.cache_backend,

@@ -139,23 +139,25 @@ class SQLiteCache(CacheBackend):
                 )
                 if entry.namespace != namespace or entry.key != key:
                     raise CacheSerializerError("cache entry identity does not match its SQLite key")
-                if not entry.is_expired:
-                    self._conn.execute(
-                        "UPDATE cache_entries SET accessed_at=? WHERE namespace=? AND key=?",
-                        (time.time(), namespace, key),
-                    )
-                    self._conn.commit()
-                return entry
             except Exception:
                 # Quarantine a corrupt/tampered value so every future request
-                # does not pay the same decode failure. The exception is still
-                # propagated to CacheBackend.get() and counted as an error.
-                self._conn.execute(
-                    "DELETE FROM cache_entries WHERE namespace=? AND key=?",
-                    (namespace, key),
-                )
-                self._conn.commit()
+                # does not pay the same decode failure. Another connection may
+                # have replaced it while decoding: remove only the read payload.
+                with self._conn:
+                    self._conn.execute(
+                        "DELETE FROM cache_entries WHERE namespace=? AND key=? AND payload=?",
+                        (namespace, key, row[0]),
+                    )
                 raise
+            if not entry.is_expired:
+                # Operational errors during the LRU update are not evidence of
+                # corrupt data and must never trigger quarantine.
+                with self._conn:
+                    self._conn.execute(
+                        "UPDATE cache_entries SET accessed_at=? WHERE namespace=? AND key=? AND payload=?",
+                        (time.time(), namespace, key, row[0]),
+                    )
+            return entry
 
     def _set_entry(self, entry: CacheEntry) -> None:
         payload = dumps_entry(

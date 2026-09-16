@@ -39,10 +39,16 @@ voyage = ["voyageai>=0.2,<1"]
 anthropic = ["anthropic>=0.25,<1"]
 litellm = ["litellm>=1.0,<2"]
 rerank = ["sentence-transformers>=2.2,<7"]
-learned-retrieval = ["sentence-transformers>=5.0,<7"]
+learned-retrieval = ["sentence-transformers>=5.0,<7", "transformers>=4.46,<6", "torch>=2.6,<3"]
+evaluation-semantic = ["transformers>=4.46,<6", "torch>=2.6,<3"]
+self-rag = ["transformers>=4.46,<6", "torch>=2.6,<3", "sentencepiece>=0.2,<1"]
+research = ["transformers>=4.46,<6", "torch>=2.6,<3", "sentencepiece>=0.2,<1"]
 multimodal = ["sentence-transformers>=2.2,<7", "Pillow>=10.0,<13"]
 colpali = ["colpali-engine>=0.3,<1", "Pillow>=10.0,<13"]
-raptor = ["scikit-learn>=1.0,<2"]
+raptor = ["scikit-learn>=1.0,<2", "umap-learn>=0.5,<0.6"]
+graphrag = ["graspologic>=3.4,<4"]
+training = ["torch>=2.2,<3"]
+training-generative = ["torch>=2.6,<3", "transformers>=4.46,<6", "sentencepiece>=0.2,<1"]
 bm25 = ["rank-bm25>=0.2.2,<1"]
 config = ["PyYAML>=6.0,<7", "pydantic>=2,<3"]
 pdf = ["pypdf>=4.0,<7"]
@@ -72,6 +78,7 @@ all = [
   "anthropic>=0.25,<1",
   "litellm>=1.0,<2",
   "scikit-learn>=1.0,<2",
+  "umap-learn>=0.5,<0.6",
   "rank-bm25>=0.2.2,<1",
   "PyYAML>=6.0,<7",
   "pydantic>=2,<3",
@@ -110,6 +117,9 @@ ignore_missing_imports = true
 follow_imports = "silent"
 files = [
   "src/cheragh/adaptive.py",
+  "src/cheragh/adaptive_learning.py",
+  "src/cheragh/long_rag.py",
+  "src/cheragh/evaluation/semantic.py",
   "src/cheragh/agentic",
   "src/cheragh/catalog",
   "src/cheragh/community_graph",
@@ -117,6 +127,7 @@ files = [
   "src/cheragh/corrective",
   "src/cheragh/evaluation/claims.py",
   "src/cheragh/flare.py",
+  "src/cheragh/generation.py",
   "src/cheragh/multihop",
   "src/cheragh/multimodal",
   "src/cheragh/raptor_engine",

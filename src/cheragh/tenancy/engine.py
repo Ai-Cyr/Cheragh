@@ -6,7 +6,7 @@ import inspect
 from typing import Any, Mapping
 
 from ..base import BaseRetriever, Document, _validate_top_k
-from ..security import AccessPolicy, Principal, AccessControlledRAGEngine
+from ..security import AccessDecision, AccessPolicy, Principal, AccessControlledRAGEngine, AccessControlledRetriever
 
 
 @dataclass
@@ -156,14 +156,17 @@ class MultiTenantRAGEngine:
         if not hasattr(target, "retrieve"):
             response = self.ask(query, tenant_id, collection_id, principal_obj, top_k=top_k)
             return list(getattr(response, "retrieved_documents", []) or [])[:top_k]
-        docs = _scope_documents(
-            target.retrieve(query, top_k=top_k * 4),
-            binding.tenant_id,
-            binding.collection_id,
+        return self._collection_retriever(binding, target, principal_obj).retrieve(query, top_k=top_k)
+
+    def _collection_retriever(
+        self, binding: CollectionBinding, target: BaseRetriever, principal: Principal,
+    ) -> BaseRetriever:
+        scoped = _ScopedRetriever(target, binding.tenant_id, binding.collection_id)
+        if not self.enforce_access_control:
+            return scoped
+        return AccessControlledRetriever(
+            scoped, principal, policy=_CollectionAccessPolicy(self.access_policy, binding),
         )
-        if self.enforce_access_control:
-            docs = self.access_policy.filter_documents(docs, principal_obj)
-        return docs[:top_k]
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -191,7 +194,7 @@ class MultiTenantRAGEngine:
             scoped_target = _ScopedRAGTarget(target, binding.tenant_id, binding.collection_id)
             return AccessControlledRAGEngine(
                 scoped_target,
-                policy=self.access_policy,
+                policy=_CollectionAccessPolicy(self.access_policy, binding),
                 default_principal=principal,
             ).ask(query, **kwargs)
         if hasattr(target, "ask") and callable(target.ask):
@@ -199,14 +202,7 @@ class MultiTenantRAGEngine:
         if hasattr(target, "retrieve") and callable(target.retrieve):
             raw_top_k = kwargs.get("top_k", 5)
             top_k = 5 if raw_top_k is None else _validate_top_k(raw_top_k)
-            docs = _scope_documents(
-                target.retrieve(query, top_k=top_k),
-                binding.tenant_id,
-                binding.collection_id,
-            )
-            if self.enforce_access_control:
-                docs = self.access_policy.filter_documents(docs, principal)
-            return docs
+            return self._collection_retriever(binding, target, principal).retrieve(query, top_k=top_k)
         if callable(target):
             return target(query, tenant_id=principal.tenant_ids, **kwargs)
         raise TypeError(f"Unsupported tenant target type: {type(target).__name__}")
@@ -271,6 +267,37 @@ def _tenant_principal(
         attributes=dict(source.attributes),
         max_classification=source.max_classification,
     )
+
+
+class _CollectionAccessPolicy(AccessPolicy):
+    """Intersect caller permissions with the collection selected for this call.
+
+    Membership in several tenants (or an admin role) authorizes selecting those
+    collections; it must not mix their documents within a selected collection.
+    The supplied policy still owns all other authorization decisions.
+    """
+
+    def __init__(self, policy: AccessPolicy, binding: CollectionBinding):
+        self.policy = policy
+        self.tenant_id = binding.tenant_id
+        self.collection_id = binding.collection_id
+
+    def authorize(self, document: Document, principal=None) -> AccessDecision:
+        if document.metadata.get("tenant_id") != self.tenant_id:
+            return AccessDecision(False, "selected_tenant_mismatch")
+        if document.metadata.get("collection_id") != self.collection_id:
+            return AccessDecision(False, "selected_collection_mismatch")
+        return self.policy.authorize(document, principal)
+
+    def filter_documents(self, documents, principal=None) -> list[Document]:
+        # Preserve custom batch authorization (for example an external ACL
+        # service) as well as policies overriding individual authorize calls.
+        scoped = [
+            document for document in documents
+            if document.metadata.get("tenant_id") == self.tenant_id
+            and document.metadata.get("collection_id") == self.collection_id
+        ]
+        return self.policy.filter_documents(scoped, principal)
 
 
 class _ScopedRetriever(BaseRetriever):

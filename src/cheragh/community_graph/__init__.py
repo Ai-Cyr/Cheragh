@@ -1,10 +1,4 @@
-"""Dependency-light Community GraphRAG baseline.
-
-The implementation is intentionally explicit about being a single-level,
-deterministic baseline rather than a full reproduction of Microsoft GraphRAG.
-See :mod:`cheragh.community_graph.engine` for the supported workflow and its
-limitations.
-"""
+"""Community GraphRAG: deterministic baseline and opt-in paper techniques."""
 
 from .engine import (
     Community,
@@ -14,12 +8,29 @@ from .engine import (
     DeterministicCommunitySummarizer,
     detect_communities,
 )
+from .paper import (
+    GlobalMapReduceConfig,
+    LeidenCommunityDetector,
+    LLMCommunitySummarizer,
+    global_map_reduce,
+)
+
+from .extraction import GraphEntity, LLMGraphExtractor, SemanticKnowledgeGraph
+from .local import LocalGraphSearchConfig
 
 __all__ = [
+    "GraphEntity",
+    "LLMGraphExtractor",
+    "SemanticKnowledgeGraph",
+    "LocalGraphSearchConfig",
     "Community",
     "CommunityGraphRAGEngine",
     "CommunityReport",
     "CommunitySummarizer",
     "DeterministicCommunitySummarizer",
     "detect_communities",
+    "GlobalMapReduceConfig",
+    "LeidenCommunityDetector",
+    "LLMCommunitySummarizer",
+    "global_map_reduce",
 ]

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import hashlib
 import math
 import random
+import re
 from typing import Any, Protocol, runtime_checkable
 
 from ..base import BaseRetriever, Document, _numpy, _snapshot_document, _validate_top_k
@@ -234,6 +235,61 @@ def contrastive_retrieval_loss(
 
 
 @dataclass(frozen=True)
+class RAFTGeneratedAnswer:
+    """A teacher-generated target grounded in verbatim oracle quotations.
+
+    ``rationale`` contains the explanatory text, with every quotation delimited
+    by ``##begin_quote##`` and ``##end_quote##`` as in RAFT section 3. The builder
+    verifies quotation provenance and agreement with the supplied ground truth;
+    it cannot automatically verify every inference in the explanation.
+    """
+
+    answer: str
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.answer, str) or not self.answer.strip():
+            raise ValueError("RAFT generated answer must be a non-empty string")
+        _raft_quotes(self.rationale)
+
+
+def _raft_quotes(rationale: str) -> tuple[str, ...]:
+    """Parse balanced, non-nested quote markers without silently losing text."""
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise ValueError("RAFT rationale must be a non-empty string")
+    begin, end = "##begin_quote##", "##end_quote##"
+    inside = False
+    quotes: list[str] = []
+    current = ""
+    for part in re.split(r"(##begin_quote##|##end_quote##)", rationale):
+        if part == begin:
+            if inside:
+                raise ValueError("RAFT quotation markers must not be nested")
+            inside = True
+            current = ""
+        elif part == end:
+            if not inside:
+                raise ValueError("RAFT quotation markers must be balanced")
+            if not current.strip():
+                raise ValueError("RAFT evidence quotations must not be empty")
+            quotes.append(current.strip())
+            inside = False
+        elif inside:
+            current += part
+    if inside:
+        raise ValueError("RAFT quotation markers must be balanced")
+    if not quotes:
+        raise ValueError("RAFT rationale requires at least one marked evidence quotation")
+    return tuple(quotes)
+
+
+def _validate_raft_quotes(rationale: str, oracles: Sequence[Document]) -> None:
+    for quote in _raft_quotes(rationale):
+        if not any(quote in oracle.content for oracle in oracles):
+            raise ValueError("RAFT evidence quotation must occur verbatim in an oracle document")
+
+
+@dataclass(frozen=True)
 class RAFTTrainingRecord:
     """Open-book fine-tuning record with oracle evidence and distractors."""
 
@@ -243,6 +299,8 @@ class RAFTTrainingRecord:
     oracle_doc_ids: tuple[str, ...]
     oracle_included: bool
     metadata: dict[str, Any] = field(default_factory=dict)
+    rationale: str | None = None
+    oracle_documents: tuple[Document, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.question, str) or not self.question.strip():
@@ -265,12 +323,27 @@ class RAFTTrainingRecord:
             raise ValueError("Included RAFT oracle ids must be present in documents")
         if not self.oracle_included and oracle_keys & document_keys:
             raise ValueError("Excluded RAFT oracle ids must not be present in documents")
+        oracles = _snapshots(self.oracle_documents)
+        if oracles:
+            if len(oracles) != len(oracle_keys) or {_document_key(document) for document in oracles} != oracle_keys:
+                raise ValueError("RAFT supervision oracle documents must match oracle_doc_ids exactly")
+            if self.oracle_included:
+                context_by_id = {_document_key(document): document.content for document in documents}
+                if any(context_by_id[_document_key(document)] != document.content for document in oracles):
+                    raise ValueError("RAFT supervision oracle content must match the included context")
+        elif self.rationale is not None and self.oracle_included:
+            oracles = tuple(document for document in documents if _document_key(document) in oracle_keys)
+        if self.rationale is not None:
+            if not oracles:
+                raise ValueError("RAFT rationale requires oracle documents to verify quotation provenance")
+            _validate_raft_quotes(self.rationale, oracles)
         object.__setattr__(self, "documents", documents)
         object.__setattr__(self, "oracle_doc_ids", oracle_doc_ids)
         object.__setattr__(self, "metadata", deepcopy(self.metadata or {}))
+        object.__setattr__(self, "oracle_documents", oracles)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "question": self.question,
             "answer": self.answer,
             "documents": [_serialize_document(document) for document in self.documents],
@@ -278,6 +351,11 @@ class RAFTTrainingRecord:
             "oracle_included": self.oracle_included,
             "metadata": deepcopy(self.metadata),
         }
+        if self.rationale is not None:
+            result["rationale"] = self.rationale
+            # Supervision-only evidence must never be appended to render_prompt().
+            result["oracle_documents"] = [_serialize_document(document) for document in self.oracle_documents]
+        return result
 
     def render_prompt(self) -> str:
         evidence = "\n\n".join(
@@ -289,28 +367,97 @@ class RAFTTrainingRecord:
             f"Documents :\n{evidence}\n\nQuestion : {self.question}\nRéponse :"
         )
 
+    def render_target(self) -> str:
+        """Return the SFT completion, unchanged by oracle context dropout."""
+        if self.rationale is None:
+            return self.answer
+        return f"##Reason: {self.rationale}\n##Answer: {self.answer}"
+
+    def to_messages(self) -> list[dict[str, str]]:
+        """Export a chat SFT row without leaking supervision into its prompt."""
+        return [
+            {"role": "user", "content": self.render_prompt()},
+            {"role": "assistant", "content": self.render_target()},
+        ]
+
 
 class RAFTDatasetBuilder:
-    """Create deterministic RAFT-style records from retrieval examples."""
+    """Create reproducible RAFT records, optionally with grounded SFT targets.
 
-    def __init__(self, *, oracle_probability: float = 1.0, seed: int = 0):
+    The optional teacher receives the query, *all* oracle documents and the
+    verified answer, even if the oracle is dropped from the model's input. This
+    preserves the same target for both branches of the paper's training recipe.
+    Enable ``shuffle_documents`` to avoid teaching the oracle's input position.
+
+    With ``context_document_count=k``, retained examples contain every oracle
+    plus enough distractors to reach k, while dropped examples contain k
+    distractors. Insufficient candidates raise an error rather than silently
+    changing that distribution. Without this option, existing behavior of
+    retaining all supplied distractors is preserved.
+
+    Reference: Zhang et al., RAFT, sections 3 and 5,
+    https://arxiv.org/abs/2403.10131. This builds supervision; it does not train
+    a language model or reproduce the paper's benchmark results.
+    """
+
+    def __init__(
+        self,
+        *,
+        oracle_probability: float = 1.0,
+        seed: int = 0,
+        shuffle_documents: bool = False,
+        context_document_count: int | None = None,
+        answer_generator: Callable[[str, Sequence[Document], str], RAFTGeneratedAnswer] | None = None,
+    ):
         if not 0.0 <= oracle_probability <= 1.0 or not math.isfinite(oracle_probability):
             raise ValueError("oracle_probability must be between 0 and 1")
         self.oracle_probability = float(oracle_probability)
         self.seed = int(seed)
+        if not isinstance(shuffle_documents, bool):
+            raise TypeError("shuffle_documents must be a boolean")
+        self.shuffle_documents = shuffle_documents
+        self.context_document_count = (
+            None
+            if context_document_count is None
+            else _validate_top_k(context_document_count, name="context_document_count")
+        )
+        if answer_generator is not None and not callable(answer_generator):
+            raise TypeError("answer_generator must be callable")
+        self.answer_generator = answer_generator
 
     def build(self, examples: Iterable[RetrievalTrainingExample]) -> list[RAFTTrainingRecord]:
-        rng = random.Random(self.seed)
+        # Independent streams keep oracle decisions stable when shuffling changes.
+        inclusion_rng = random.Random(self.seed)
+        document_rng = random.Random(self.seed)
         records: list[RAFTTrainingRecord] = []
         for example in examples:
             if example.answer is None or not example.answer.strip():
                 raise ValueError("RAFT records require a non-empty answer")
-            include_oracle = rng.random() < self.oracle_probability
-            documents = (
-                (*example.positive_documents, *example.negative_documents)
-                if include_oracle
-                else example.negative_documents
-            )
+            oracles = _snapshots(example.positive_documents)
+            oracle_contents = {document.content.strip() for document in oracles}
+            if any(document.content.strip() in oracle_contents for document in example.negative_documents):
+                raise ValueError("RAFT distractors must not duplicate oracle content")
+            include_oracle = inclusion_rng.random() < self.oracle_probability
+            distractors = list(example.negative_documents)
+            if self.context_document_count is not None:
+                required = self.context_document_count - (len(oracles) if include_oracle else 0)
+                if required < 0:
+                    raise ValueError("context_document_count cannot be smaller than the included oracle count")
+                if len(distractors) < required:
+                    raise ValueError("Not enough distractors to satisfy context_document_count")
+                distractors = document_rng.sample(distractors, required)
+            documents = [*oracles, *distractors] if include_oracle else distractors
+            if self.shuffle_documents:
+                document_rng.shuffle(documents)
+            rationale = None
+            if self.answer_generator is not None:
+                generated = self.answer_generator(example.query, _snapshots(oracles), example.answer)
+                if not isinstance(generated, RAFTGeneratedAnswer):
+                    raise TypeError("answer_generator must return RAFTGeneratedAnswer")
+                if generated.answer.strip() != example.answer.strip():
+                    raise ValueError("RAFT generated answer must agree with the verified answer")
+                _validate_raft_quotes(generated.rationale, oracles)
+                rationale = generated.rationale
             records.append(
                 RAFTTrainingRecord(
                     question=example.query,
@@ -319,6 +466,8 @@ class RAFTDatasetBuilder:
                     oracle_doc_ids=example.positive_doc_ids,
                     oracle_included=include_oracle,
                     metadata={**example.metadata, "recipe": "raft"},
+                    rationale=rationale,
+                    oracle_documents=oracles if rationale is not None else (),
                 )
             )
         return records
@@ -403,6 +552,7 @@ __all__ = [
     "DistilledRetrievalExample",
     "HardNegativeMiner",
     "RAFTDatasetBuilder",
+    "RAFTGeneratedAnswer",
     "RAFTTrainingRecord",
     "RetrievalTrainerProtocol",
     "RetrievalTrainingExample",

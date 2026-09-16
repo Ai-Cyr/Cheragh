@@ -156,15 +156,30 @@ class AccessControlledRetriever(BaseRetriever):
     ):
         self.retriever = retriever
         self.principal = _coerce_principal(principal)
-        self.policy = policy or AccessPolicy()
+        self.policy = policy if policy is not None else AccessPolicy()
         self.overfetch_factor = _validate_top_k(overfetch_factor, name="overfetch_factor")
         self.max_candidates = _validate_top_k(max_candidates, name="max_candidates")
         self.last_denied_count = 0
         self.last_scanned_count = 0
         self.last_candidate_limit_reached = False
+        # Hierarchical retrievers must authorize original evidence before
+        # exposing derived summaries. Flattened metadata cannot express an
+        # arbitrary policy over every source that contributed to a summary.
+        authorize_sources = getattr(retriever, "for_principal", None)
+        self._authorized_retriever = (authorize_sources(self.principal, policy=self.policy)
+                                      if callable(authorize_sources) else None)
+        if self._authorized_retriever is not None and not callable(getattr(self._authorized_retriever, "retrieve", None)):
+            raise TypeError("for_principal must return an authorized retriever")
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         top_k = _validate_top_k(top_k)
+        if self._authorized_retriever is not None:
+            limit = min(top_k, self.max_candidates)
+            documents = list(self._authorized_retriever.retrieve(query, top_k=limit))[:limit]
+            self.last_scanned_count = len(documents)
+            self.last_denied_count = 0
+            self.last_candidate_limit_reached = top_k > self.max_candidates
+            return documents
         candidate_limit = min(
             self.max_candidates,
             max(top_k, top_k * self.overfetch_factor),
@@ -217,7 +232,7 @@ class AccessControlledRAGEngine:
         max_candidates: int = 10_000,
     ):
         self.base_engine = base_engine
-        self.policy = policy or AccessPolicy()
+        self.policy = policy if policy is not None else AccessPolicy()
         self.default_principal = _coerce_principal(default_principal)
         self.overfetch_factor = _validate_top_k(overfetch_factor, name="overfetch_factor")
         self.max_candidates = _validate_top_k(max_candidates, name="max_candidates")

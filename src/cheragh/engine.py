@@ -22,9 +22,11 @@ from .base import (
     HashingEmbedding,
     LLMClient,
     OpenAILLMClient,
+    _close_stream,
     _snapshot_document,
     _validate_top_k,
 )
+from ._streaming import _iterate_in_worker
 from .citations import extract_citations, validate_citations
 from .hybrid_search import BM25Retriever, HybridSearchRetriever
 from .schema import RAGResponse, Source
@@ -704,8 +706,10 @@ class RAGEngine:
             trace.prompt = prompt
         step = trace.start_step("generation", prompt_chars=len(prompt), streaming=True) if trace else None
         chunks: list[str] = []
+        provider_stream = None
         try:
-            for chunk in self.llm_client.stream(prompt, **generate_kwargs):
+            provider_stream = self.llm_client.stream(prompt, **generate_kwargs)
+            for chunk in provider_stream:
                 if not isinstance(chunk, str):
                     raise TypeError("llm_client.stream() must yield only str chunks")
                 chunks.append(chunk)
@@ -738,6 +742,10 @@ class RAGEngine:
                 )
                 self._finalize_trace(trace, answer=partial_answer, prompt=prompt)
             raise
+
+        finally:
+            if provider_stream is not None:
+                _close_stream(provider_stream)
 
         answer = "".join(chunks)
         if step:
@@ -780,9 +788,18 @@ class RAGEngine:
         )
 
     async def astream(self, query: str, top_k: int | None = None, **generate_kwargs: Any):
-        """Async streaming wrapper. Yields chunks from the synchronous stream."""
-        for chunk in self.stream(query, top_k=top_k, **generate_kwargs):
-            yield chunk
+        """Stream without blocking the event loop on synchronous providers.
+
+        Close the async iterator when abandoning a stream. Cancellation closes
+        an active provider as soon as its current synchronous call returns;
+        provider network timeouts still bound that call.
+        """
+        stream = _iterate_in_worker(self.stream(query, top_k=top_k, **generate_kwargs))
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await stream.aclose()
 
     def _query_variants(self, query: str, trace: RAGTrace | None) -> list[str]:
         if self.query_transformer is None:

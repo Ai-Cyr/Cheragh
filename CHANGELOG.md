@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Support Sentence Transformers 6 alongside 5, with CPU integration tests for local embeddings, reranking, token embeddings and CLIP.
+- Encode CLIP text and image batches separately and restore document order, supporting versions that reject mixed-modality batches.
+
+- Correct HyQE additive candidate scoring, HyDE document-space averaging, true cosine, BM25 consistency and rank-based query/federated fusion.
+- Add trained SPLADE and ColBERTv2 encoders with checkpoint-specific tokenization/projection; correct ColPali processing and MaxSim masks.
+- Add passage-conditioned segmented Self-RAG with a Transformers logits decoder and bounded beam search.
+- Add actual strategy-labelled Adaptive-RAG training, causal/seq2seq RAFT SFT and joint RankRAG ranking/answer generation.
+- Add LongRAG grouping/retrieval/reader, full Step-Back and sequential Chain-of-Note inference paths.
+- Add semantic GraphRAG extraction/local search, calibrated CRAG grading/refinement, concrete NLI/LLM claim evaluation and TimeR4 dual retrieval/temporal supervision.
+- Preserve chunk coverage and source offsets, validate extracted evidence, retain parent ACLs and authorize all source dependencies of derived summaries.
+- Add real tiny-model learning tests, opt-in published-checkpoint checks, CPU research CI and an updated 44-technique fidelity audit.
+
+- Make Python async streaming non-blocking, preserve provider context and close cancelled streams even when the executor is saturated.
+- Intersect multi-tenant retrieval with the selected tenant and collection, including admin users, while preserving custom ACL policies and progressively searching past denied results.
+- Isolate cached authorized retrieval by principal, policy and selected collection, including changes in permissions.
+- Make the default extractive client answer from retrieved evidence instead of echoing system instructions and placeholder citations.
+- Remove cache-key type/separator collisions, preserve reserved-key JSON metadata and prevent SQLite quarantine from deleting a concurrent replacement.
+- Validate and copy cached embeddings before publication; keep vector-store documents and embeddings aligned on allocation failure.
+- Rebuild untracked local indexes without retaining unrelated documents from a previous corpus.
+- Apply HTTP capacity and timeout limits to stats, validate listener settings before loading providers and honor explicit indexing overrides.
+- Exercise installed wheel/sdist through indexing and generation, retain validated CI artifacts with hashes, and audit the deployed server dependency profile.
+
+- Add optional RAPTOR global/local UMAP–GMM soft clustering, bounded summary inputs and cosine-based `paper_tree` traversal.
+- Add hierarchical Leiden community detection and budgeted GraphRAG global map-reduce with source authorization and citation checks.
+- Connect FLARE to aligned generation-time token log probabilities and mask uncertain tokens from retrieval queries.
+- Add grounded RAFT supervision with verified quote spans, reproducible document shuffling and fixed-size oracle dropout contexts.
+- Add optional real PyTorch retrieval optimization and strict Self-RAG reflection probability scoring boundaries.
+- Preserve request context and stream cleanup under cancellation; enforce omitted `top_k` and chunked request limits before provider work.
+- Close OpenAI/Azure/LiteLLM transports explicitly and accept usage-only streaming events.
+- Encode Redis prefix/namespace/key boundaries independently; the new v2 key format starts cold and leaves legacy keys untouched (see the production migration guide).
+- Audit all 44 technique entries against their documented scope and retain explicit research and deployment qualification limits.
+
 - Add a stable `response_id` to every RAG response and carry it into feedback evaluation metadata.
 - Make feedback evaluation exports use the evaluator's canonical `query` field while continuing to accept legacy `question` datasets.
 - Deepen access-controlled retrieval progressively, up to a configurable candidate limit, so authorized evidence is not lost behind a fixed over-fetch window.

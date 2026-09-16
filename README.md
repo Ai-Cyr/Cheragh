@@ -50,10 +50,12 @@ Les intégrations restent optionnelles :
 | `openai`, `cohere`, `voyage`, `anthropic`, `litellm` | fournisseurs d'embeddings ou de génération |
 | `pdf`, `docx`, `config` | chargeurs documentaires et YAML |
 | `faiss`, `chroma`, `qdrant`, `redis` | stockage vectoriel et cache |
-| `learned-retrieval`, `multimodal`, `raptor`, `bm25` | techniques spécialisées légères ou intermédiaires |
+| `learned-retrieval`, `multimodal`, `raptor`, `graphrag` | retrieval appris, images et backends de clustering |
+| `research`, `self-rag`, `evaluation-semantic`, `training-generative` | adaptateurs Transformers, juges et entraînement ; PyTorch adapté au matériel |
 | `colpali` | modèle ColPali officiel et retrieval visuel multi-vecteur |
+| `graphrag`, `training` | Leiden hiérarchique et entraînement retrieval PyTorch, séparés car volumineux |
 | `fastapi` | serveur HTTP avec Uvicorn |
-| `all` | intégrations courantes, hors ColPali lourd et outils de développement |
+| `all` | intégrations courantes, hors ColPali, GraphRAG, entraînement PyTorch et outils de développement |
 
 Exemple :
 
@@ -191,6 +193,21 @@ print("".join(stream))
 print(stream.response.sources)  # disponible après consommation du flux
 ```
 
+`astream` exécute les fournisseurs synchrones hors de la boucle événementielle.
+Lors d'un arrêt anticipé, fermez le flux avec `contextlib.aclosing` :
+
+```python
+from contextlib import aclosing
+
+async def read_answer(engine):
+    async with aclosing(engine.astream("Explique le RAG")) as stream:
+        async for chunk in stream:
+            print(chunk, end="", flush=True)
+```
+
+Une annulation libère le consommateur ; le transport est fermé dès que l'appel
+synchrone en cours termine. Les timeouts du fournisseur restent nécessaires.
+
 Le paramètre `top_k` suit le même contrat partout : entier strictement positif, hors booléens.
 
 ## Indexation et évaluation
@@ -215,20 +232,20 @@ cheragh techniques show self-rag
 | **Bêta** · 12 | chunking sémantique/hiérarchique, reranking/RRF, compression, parent-child, multi-hop, fédéré, conversationnel, SQL, ACL, évaluation génération |
 | **Expérimental** · 26 | HyDE/HyQE/RAG-Fusion, CRAG, Self-RAG, Adaptive/Agentic RAG, RAPTOR, GraphRAG-lite et Community GraphRAG, FLARE, packing long-contexte, SPLADE, ColBERT/ColPali, Temporal RAG, évaluation claim-level, entraînement retrieval-aware et autres variantes |
 
-Quelques limites importantes :
+Les nouveaux chemins de recherche sont disponibles avec leurs modèles optionnels :
 
-- SPLADE, ColBERT et ColPali utilisent des calculs exacts en mémoire, sans index distribué ou ANN multivecteur compressé ;
-- Self-RAG couvre l'orchestration d'inférence, pas l'entraînement avec reflection tokens ;
-- RAPTOR propose désormais un parcours top-down borné, mais garde un clustering hard greedy et un summarizer injectable ; Community GraphRAG reste mono-niveau, sans Leiden hiérarchique ni map-reduce complet ;
-- FLARE accepte des signaux de confiance token-level, mais conserve un fallback par longueur pour les clients LLM texte-only ; Adaptive-RAG accepte un classifieur appris, tandis que son fallback local reste heuristique ;
-- le packing long-contexte borne exactement le rendu selon le tokenizer injecté, sans constituer à lui seul un long reader entraîné ;
-- l'évaluation claim-level exige un juge NLI/LLM injecté pour détecter sémantiquement paraphrases et contradictions ; le fallback lexical ne le prétend pas ;
-- Agentic RAG exécute une boucle bornée avec des outils explicitement enregistrés ;
-- Temporal RAG exige des métadonnées temporelles fiables et des scores initiaux comparables ;
-- le pipeline d'entraînement prépare le mining, la distillation et des données RAFT, mais ne fournit ni poids, ni optimiseur, ni entraînement distribué ;
-- le multimodal couvre le texte et les images locales, avec CLIP ou un encodeur ColPali optionnel.
+- **SPLADE/ColBERT** : poids entraînés, masques et formules de pooling/MaxSim ; les index restent exacts en mémoire.
+- **Self-RAG** : segments par passage, logits de réflexion, Retrieve/No/Continue et faisceau avec `SegmentedSelfRAGEngine` et `TransformersSelfRAGDecoder` ; checkpoint compatible requis.
+- **Adaptive-RAG et RAFT/RankRAG** : collecte de labels à partir des stratégies réelles, classifieur entraînable et SFT causal/seq2seq. RankRAG classe et répond avec les mêmes poids.
+- **RAPTOR et Community GraphRAG** : UMAP/GMM, Leiden, extraction sémantique ancrée, résumés, recherche locale et map-reduce global avec provenance.
+- **LongRAG** : groupes documentaires, classement par fragments et lecteur long à une/deux étapes ; le packer reste utilisable séparément.
+- **CRAG et évaluation des assertions** : cross-encoder calibré, raffinement sémantique et juges NLI/LLM concrets.
+- **TimeR4** : deux espaces FKS/TKS, réécriture temporelle ancrée et reranking ; le modèle temporel entraîné est fourni par l’application.
+- **HyQE/HyDE, Step-Back et Chain-of-Note** : scores corrigés, étapes de génération explicites et preuves conservées.
 
-Les 44 entrées du catalogue ont ainsi une implémentation ou une baseline bornée et testée ; cela ne signifie pas que toutes les méthodes RAG publiées sont reproduites. Consultez [l'audit et les renforcements v1.3](docs/architectures_v130.md), puis [les architectures v1.2](docs/architectures_v120.md), pour les contrats détaillés.
+Ces implémentations ont des tests de mécanismes, d’intégration et d’apprentissage sur CPU. SPLADE, ColBERT, NLI et le grader CRAG ont aussi été exécutés avec des checkpoints publiés. Cela ne constitue pas une reproduction de leurs benchmarks ; les poids ColPali complets, Self-RAG 7B/13B et le grand propositionizer n’ont pas été exécutés ici.
+
+Voir les [recettes et dépendances](docs/research_recipes.md), l’[audit des 44 techniques](docs/sota_implementation_audit.md), la [matrice de fidélité](docs/research_fidelity.md) et les [résultats de vérification](docs/research_validation.md). Les API historiques restent disponibles ; la maturité n’est pas promue automatiquement par ces ajouts.
 
 ## Sécurité et production
 

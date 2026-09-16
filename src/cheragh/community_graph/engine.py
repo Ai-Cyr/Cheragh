@@ -1,4 +1,4 @@
-"""Deterministic, dependency-light Community GraphRAG baseline.
+"""Community GraphRAG with a dependency-light baseline and optional paper methods.
 
 The design follows the high-level workflow in *From Local to Global: A Graph
 RAG Approach to Query-Focused Summarization* (Edge et al., arXiv:2404.16130):
@@ -6,14 +6,13 @@ partition an entity graph, pre-generate a report for every community, and use
 those reports for global questions.  Local search instead starts from entities
 named in the query and expands to their communities and source documents.
 
-This module is deliberately a baseline, not a reproduction of Microsoft
-GraphRAG.  It uses one deterministic modularity local-moving pass rather than a
-hierarchical Leiden partition, the existing rule-based ``KnowledgeGraph``
-builder rather than LLM entity/claim extraction, lexical report scoring rather
-than LLM map/reduce helpfulness scoring, and one final generation call.  It has
-no incremental or persistent community index.  Applications should inject a
-domain-appropriate graph and summarizer and evaluate quality before production
-use.
+The default remains a deterministic single-level baseline. Inject
+``LeidenCommunityDetector`` and ``LLMCommunitySummarizer`` for hierarchical
+indexing, and call ``ask_global_map_reduce`` for query-focused map/reduce over
+all reports at a selected hierarchy frontier. Inject ``LLMGraphExtractor`` for
+semantic entity/relationship extraction and an embedding model for entity
+description search with mixed local graph/text/report evidence. This is not
+a reproduction of the paper's evaluation or the Microsoft GraphRAG product.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ from typing import Any, Callable, Iterable, Protocol, Sequence, runtime_checkabl
 
 from ..base import (
     Document,
+    EmbeddingModel,
     ExtractiveLLMClient,
     LLMClient,
     _snapshot_document,
@@ -87,6 +87,8 @@ class Community:
     entities: tuple[str, ...]
     triples: tuple[KnowledgeTriple, ...]
     doc_ids: tuple[str, ...]
+    level: int = 0
+    parent_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +96,8 @@ class Community:
             "entities": list(self.entities),
             "triples": [_snapshot_triple(triple).to_dict() for triple in self.triples],
             "doc_ids": list(self.doc_ids),
+            "level": self.level,
+            "parent_id": self.parent_id,
         }
 
 
@@ -225,7 +229,7 @@ class CommunityGraphRAGEngine:
     documents:
         Source documents.  They are defensively copied and missing identifiers
         are assigned inside the index without mutating caller-owned objects.
-    graph:
+        graph:
         Optional prebuilt ``KnowledgeGraph``.  Supplying a richer extractor is
         recommended; the default graph builder is only a rule-based baseline.
     summarizer:
@@ -253,6 +257,10 @@ class CommunityGraphRAGEngine:
         answer_prompt: str = DEFAULT_ANSWER_PROMPT_FR,
         require_citations: bool = False,
         trace_enabled: bool = True,
+        community_detector: Callable[[KnowledgeGraph], Sequence[Community]] | None = None,
+        graph_extractor: Callable[[Iterable[Document]], KnowledgeGraph] | None = None,
+        embedding_model: EmbeddingModel | None = None,
+        local_search_config: Any = None,
     ):
         validated_top_k = _validate_top_k(top_k)
         snapshots = _snapshot_documents(documents)
@@ -282,17 +290,38 @@ class CommunityGraphRAGEngine:
             document.doc_id = doc_id
             self._documents_by_id[doc_id] = document
 
-        source_graph = graph if graph is not None else build_knowledge_graph(_snapshot_documents(snapshots))
+        if graph is not None and graph_extractor is not None:
+            raise ValueError("provide graph or graph_extractor, not both")
+        if graph_extractor is not None and not callable(graph_extractor):
+            raise TypeError("graph_extractor must be callable")
+        source_graph = graph if graph is not None else (
+            graph_extractor(_snapshot_documents(snapshots)) if graph_extractor is not None else
+            build_knowledge_graph(_snapshot_documents(snapshots))
+        )
+        if not isinstance(source_graph, KnowledgeGraph):
+            raise TypeError("graph_extractor must return a KnowledgeGraph")
+        self._baseline_partition = community_detector is None
+        self._rule_based_graph = graph is None and graph_extractor is None
+        self._architecture = "community_graph_rag_baseline" if self._baseline_partition else "community_graph_rag"
         self._graph = _snapshot_graph(source_graph)
         self._communities = tuple(
+            community_detector(_snapshot_graph(self._graph)) if community_detector is not None else
             detect_communities(
                 self._graph,
                 resolution=resolution,
                 max_iterations=max_iterations,
             )
         )
+        from .paper import validate_hierarchy
+
+        validate_hierarchy(self._communities, self._graph.entities())
+        self._communities = tuple(_snapshot_community(community) for community in self._communities)
+        self._communities_by_id = {community.community_id: community for community in self._communities}
         self._summarizer = summarizer or DeterministicCommunitySummarizer()
-        self._reports = tuple(self._build_report(community) for community in self._communities)
+        self._reports_by_id: dict[int, CommunityReport] = {}
+        for community in sorted(self._communities, key=lambda item: (-item.level, item.community_id)):
+            self._reports_by_id[community.community_id] = self._build_report(community)
+        self._reports = tuple(self._reports_by_id[community.community_id] for community in self._communities)
         self.llm_client = llm_client or ExtractiveLLMClient()
         self.top_k = validated_top_k
         self.answer_prompt = answer_prompt
@@ -300,9 +329,16 @@ class CommunityGraphRAGEngine:
         self.trace_enabled = bool(trace_enabled)
 
         self._entity_to_community: dict[str, int] = {}
-        for community in self._communities:
+        for community in sorted(self._communities, key=lambda item: (item.level, item.community_id)):
             for entity in community.entities:
                 self._entity_to_community[_norm_entity(entity)] = community.community_id
+        self._semantic_local = None
+        if embedding_model is not None:
+            from .local import SemanticLocalSearch
+
+            self._semantic_local = SemanticLocalSearch(self, embedding_model, local_search_config)
+        elif local_search_config is not None:
+            raise ValueError("local_search_config requires an embedding_model")
 
     @classmethod
     def from_documents(cls, documents: Iterable[Document], **kwargs: Any) -> "CommunityGraphRAGEngine":
@@ -347,6 +383,8 @@ class CommunityGraphRAGEngine:
         """Retrieve source documents through matched entities and communities."""
 
         top_k = _validate_top_k(top_k)
+        if self._semantic_local is not None:
+            return self._semantic_local.retrieve(query, top_k=top_k)
         entity_scores = self._match_entities(query)
         report_scores = {report.community_id: score for report, score, _ in self._rank_reports(query)}
         doc_scores: dict[str, float] = defaultdict(float)
@@ -356,7 +394,7 @@ class CommunityGraphRAGEngine:
         if entity_scores:
             for entity, entity_score in entity_scores.items():
                 community_id = self._entity_to_community[entity]
-                community = self._communities[community_id]
+                community = self._communities_by_id[community_id]
                 direct_ids = self._graph.entity_to_doc_ids.get(entity, set())
                 for doc_id in community.doc_ids:
                     if doc_id not in self._documents_by_id:
@@ -418,6 +456,8 @@ class CommunityGraphRAGEngine:
 
         normalized_mode = _validate_mode(mode)
         effective_top_k = self.top_k if top_k is None else _validate_top_k(top_k)
+        if normalized_mode == "local" and self._semantic_local is not None:
+            return self._semantic_local.ask(query, top_k=effective_top_k, **generate_kwargs)
         documents = self.search(query, top_k=effective_top_k, mode=normalized_mode)
         trace = RAGTrace(query=query) if self.trace_enabled else None
         if trace:
@@ -448,7 +488,7 @@ class CommunityGraphRAGEngine:
             trace.finish(
                 answer_chars=len(answer),
                 prompt_chars=len(prompt),
-                architecture="community_graph_rag_baseline",
+                architecture=self._architecture,
                 mode=normalized_mode,
             )
         selected_communities = sorted(
@@ -466,15 +506,16 @@ class CommunityGraphRAGEngine:
             retrieved_documents=response_documents,
             prompt=prompt,
             metadata={
-                "architecture": "community_graph_rag_baseline",
+                "architecture": self._architecture,
                 "mode": normalized_mode,
                 "top_k": effective_top_k,
                 "community_count": len(self._communities),
                 "selected_communities": selected_communities,
                 "limitations": [
-                    "single_level_deterministic_partition_not_hierarchical_leiden",
+                    *(["single_level_deterministic_partition_not_hierarchical_leiden"]
+                      if self._baseline_partition else []),
                     "lexical_report_scoring_not_llm_map_reduce",
-                    "rule_based_graph_when_no_graph_is_injected",
+                    *(["rule_based_graph_when_no_graph_is_injected"] if self._rule_based_graph else []),
                 ],
             },
             citations=validation.citations,
@@ -495,16 +536,50 @@ class CommunityGraphRAGEngine:
 
         return self.ask(query, top_k=top_k, mode="local", **generate_kwargs)
 
+    def ask_global_map_reduce(self, query: str, **kwargs: Any) -> RAGResponse:
+        """Answer from all authorized reports using bounded, scored map/reduce.
+
+        See :func:`cheragh.community_graph.global_map_reduce` for budgets,
+        hierarchy selection and fail-closed source authorization. Existing
+        ``ask_global`` keeps its lexical top-k behavior for compatibility.
+        """
+        from .paper import global_map_reduce
+
+        return global_map_reduce(self, query, **kwargs)
+
     def _build_report(self, community: Community) -> CommunityReport:
+        children = [
+            _snapshot_report(self._reports_by_id[child.community_id])
+            for child in self._communities if child.parent_id == community.community_id
+        ]
+        # Recover source dependencies from the graph and descendants as well
+        # as the detector's declaration. A detector omitting a source ID must
+        # never turn a mixed report into apparently public evidence.
+        source_ids = set(community.doc_ids)
+        source_ids.update(triple.doc_id for triple in community.triples if triple.doc_id)
+        for triple in community.triples:
+            dependencies = triple.metadata.get("source_doc_ids", [])
+            if (not isinstance(dependencies, (list, tuple, set, frozenset))
+                    or any(not isinstance(source, str) or not source.strip() for source in dependencies)):
+                raise ValueError("relationship source_doc_ids must contain non-empty source IDs")
+            # A relationship description may consolidate facts from several
+            # sources, even when this triple occurrence has only one doc_id.
+            source_ids.update(dependencies)
+        source_ids.update(doc_id for entity in community.entities
+                          for doc_id in self._graph.entity_to_doc_ids.get(_norm_entity(entity), ()))
+        source_ids.update(doc_id for child in children for doc_id in child.doc_ids)
         source_documents = [
             _snapshot_document(self._documents_by_id[doc_id])
-            for doc_id in community.doc_ids
+            for doc_id in sorted(source_ids)
             if doc_id in self._documents_by_id
         ]
         public_community = _snapshot_community(community)
         public_documents = _snapshot_documents(source_documents)
         summarizer = self._summarizer
-        if isinstance(summarizer, CommunitySummarizer):
+        hierarchical_summarize = getattr(summarizer, "summarize_hierarchy", None)
+        if callable(hierarchical_summarize):
+            summary = hierarchical_summarize(public_community, public_documents, children)
+        elif isinstance(summarizer, CommunitySummarizer):
             summary = summarizer.summarize(public_community, public_documents)
         elif callable(summarizer):
             summary = summarizer(public_community, public_documents)
@@ -531,12 +606,19 @@ class CommunityGraphRAGEngine:
             title=title,
             summary=summary,
             entities=tuple(community.entities),
-            doc_ids=tuple(community.doc_ids),
+            doc_ids=tuple(sorted(source_ids)),
             metadata={
-                "source_doc_ids": list(community.doc_ids),
+                "source_doc_ids": sorted(source_ids),
                 "provenance": provenance,
                 "triple_count": len(community.triples),
-                "baseline": True,
+                "baseline": self._baseline_partition and isinstance(self._summarizer, DeterministicCommunitySummarizer),
+                "level": community.level,
+                "parent_id": community.parent_id,
+                "provenance_complete": bool(source_ids)
+                and all(doc_id in self._documents_by_id for doc_id in source_ids)
+                and all(triple.doc_id in self._documents_by_id for triple in community.triples)
+                and all(self._graph.entity_to_doc_ids.get(_norm_entity(entity)) for entity in community.entities)
+                and all(child.metadata.get("provenance_complete") is True for child in children),
             },
         )
 
@@ -588,7 +670,7 @@ class CommunityGraphRAGEngine:
         metadata = deepcopy(report.metadata)
         metadata.update(
             {
-                "architecture": "community_graph_rag_baseline",
+                "architecture": self._architecture,
                 "retrieval_method": "community_report",
                 "community_id": report.community_id,
                 "community_ids": [report.community_id],
@@ -626,8 +708,11 @@ def _weighted_adjacency(graph: KnowledgeGraph) -> tuple[list[str], dict[str, dic
         if not subject or not obj or subject == obj:
             continue
         nodes.update((subject, obj))
-        weights[subject][obj] += 1.0
-        weights[obj][subject] += 1.0
+        weight = triple.metadata.get("weight", 1.0)
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight <= 0:
+            raise ValueError("graph relationship weights must be positive and finite")
+        weights[subject][obj] += float(weight)
+        weights[obj][subject] += float(weight)
     # Preserve caller-supplied graph edges that have no corresponding triple.
     for subject in sorted(graph.adjacency):
         normalized_subject = _norm_entity(subject)
@@ -693,7 +778,12 @@ def _local_moving_partition(
 
 
 def _snapshot_graph(graph: KnowledgeGraph) -> KnowledgeGraph:
-    snapshot = KnowledgeGraph()
+    from .extraction import SemanticKnowledgeGraph
+
+    snapshot: KnowledgeGraph = (
+        SemanticKnowledgeGraph(entity_records=deepcopy(graph.entity_records))
+        if isinstance(graph, SemanticKnowledgeGraph) else KnowledgeGraph()
+    )
     for triple in sorted(graph.triples, key=_triple_sort_key):
         snapshot.add_triple(_snapshot_triple(triple))
     for entity, doc_ids in graph.entity_to_doc_ids.items():
@@ -720,6 +810,8 @@ def _snapshot_community(community: Community) -> Community:
         entities=tuple(community.entities),
         triples=tuple(_snapshot_triple(triple) for triple in community.triples),
         doc_ids=tuple(community.doc_ids),
+        level=community.level,
+        parent_id=community.parent_id,
     )
 
 

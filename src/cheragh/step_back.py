@@ -21,9 +21,10 @@ Complémentaire à HyDE : HyDE *matérialise* une réponse, Step-Back
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, List
 
 from .base import BaseRetriever, Document, LLMClient, _validate_top_k
+from .reranking import ReciprocalRankFusionReranker, _rrf_document_key
 
 
 STEP_BACK_PROMPT_FR = """Reformule la question spécifique suivante en une question plus générale et plus abstraite
@@ -77,40 +78,76 @@ class StepBackRetriever(BaseRetriever):
         original_hits = self.base_retriever.retrieve(query, top_k=self.n_original)
         stepback_hits = self.base_retriever.retrieve(stepback_query, top_k=self.n_stepback)
 
-        # 3) Dédoublonnage en conservant l'origine (spécifique / général)
-        seen: Dict[str, Document] = {}
-        for doc in original_hits:
-            key = doc.doc_id if doc.doc_id is not None else f"content::{hash(doc.content)}"
-            seen[key] = Document(
-                content=doc.content,
-                metadata={**doc.metadata, "retrieval_source": "original", "stepback_query": stepback_query},
-                doc_id=doc.doc_id,
-                score=doc.score,
-            )
-        for doc in stepback_hits:
-            key = doc.doc_id if doc.doc_id is not None else f"content::{hash(doc.content)}"
-            if key in seen:
-                # Déjà trouvé par la question originale → marquer comme "both"
-                seen[key].metadata["retrieval_source"] = "both"
-            else:
-                seen[key] = Document(
-                    content=doc.content,
-                    metadata={**doc.metadata, "retrieval_source": "stepback", "stepback_query": stepback_query},
-                    doc_id=doc.doc_id,
-                    score=doc.score,
-                )
-
-        # 4) On privilégie les "both" puis "original" puis "stepback" et trie par score
-        priority = {"both": 0, "original": 1, "stepback": 2}
-        merged = sorted(
-            seen.values(),
-            key=lambda d: (priority.get(d.metadata.get("retrieval_source", "stepback"), 3), -(d.score or 0)),
-        )
-        return merged[:top_k]
+        # Rank fusion preserves both evidence streams without comparing scores
+        # of different queries or placing all specific hits before abstractions.
+        original_keys = {_rrf_document_key(doc) for doc in original_hits}
+        stepback_keys = {_rrf_document_key(doc) for doc in stepback_hits}
+        merged = ReciprocalRankFusionReranker().fuse([original_hits, stepback_hits], top_k=top_k)
+        for document in merged:
+            key = _rrf_document_key(document)
+            origin = "both" if key in original_keys & stepback_keys else "original" if key in original_keys else "stepback"
+            document.metadata.update(retrieval_source=origin, stepback_query=stepback_query)
+        return merged
 
     # ------------------------------------------------------------------ #
     def _generate_stepback(self, query: str) -> str:
         prompt = STEP_BACK_PROMPT_FR.format(query=query)
         stepback = self.llm_client.generate(prompt).strip()
         # Garder une seule ligne si le LLM est bavard
-        return stepback.split("\n")[0].strip()
+        return stepback.split("\n")[0].strip() or query
+
+
+class StepBackRAGEngine:
+    """Abstraction → evidence-based principles → original-question reasoning.
+
+    Implements the two-stage method of Zheng et al. (arXiv:2310.06117),
+    retaining the original sources as evidence for both generation stages.
+    The intermediate abstraction answer is never promoted to a source.
+    """
+
+    def __init__(self, retriever: BaseRetriever, llm_client: LLMClient, *,
+                 n_original: int = 3, n_stepback: int = 3, **engine_kwargs: Any):
+        self.retriever = StepBackRetriever(retriever, llm_client, n_original, n_stepback)
+        self.llm_client = llm_client
+        if "answer_prompt" in engine_kwargs or "retriever" in engine_kwargs or "llm_client" in engine_kwargs:
+            raise ValueError("StepBackRAGEngine owns the staged answer prompt and retrieval")
+        self.engine_kwargs = engine_kwargs
+
+    def ask(self, query: str, *, top_k: int | None = None):
+        from .base import _snapshot_documents
+        from .engine import RAGEngine
+        from .pipeline import AdvancedRAGPipeline
+
+        limit = self.retriever.n_original + self.retriever.n_stepback if top_k is None else _validate_top_k(top_k)
+        documents = self.retriever.retrieve(query, top_k=limit)
+        for document in documents:
+            if not document.doc_id:
+                document.doc_id = "stepback-" + _rrf_document_key(document).removeprefix("content::")
+        stepback = documents[0].metadata["stepback_query"] if documents else query
+        general = [doc for doc in documents if doc.metadata["retrieval_source"] in {"both", "stepback"}]
+        principle_prompt = (
+            "Réponds à la question générale à partir des sources ci-dessous. Dégage les concepts et faits "
+            "utiles, préserve leurs conditions et exceptions, cite [source: doc_id]. "
+            "Si les sources sont insuffisantes, indique-le.\n\n"
+            f"Question générale : {stepback}\n\nSources :\n{AdvancedRAGPipeline._format_context(general)}"
+        )
+        principles = self.llm_client.generate(principle_prompt) if general else "Preuves générales insuffisantes."
+        # Escape generated text before inserting it in a later .format template.
+        abstraction = f"Question générale : {stepback}\nSynthèse provisoire : {principles}".replace("{", "{{").replace("}", "}}")
+        prompt = (
+            "Réponds à la question initiale en appliquant les principes généraux aux faits spécifiques. "
+            "La synthèse provisoire ci-dessous est un raisonnement auxiliaire, pas une nouvelle source. "
+            "Vérifie-la contre les extraits, tiens compte des exceptions et n'invente pas de faits. "
+            "Cite uniquement les sources fournies sous la forme [source: doc_id]. "
+            "Si les preuves sont insuffisantes, indique-le.\n\n" + abstraction +
+            "\n\nExtraits :\n{context}\n\nQuestion : {query}\n\nRéponse :"
+        )
+
+        class Evidence(BaseRetriever):
+            def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+                return _snapshot_documents(documents[:top_k])
+
+        response = RAGEngine(Evidence(), self.llm_client, answer_prompt=prompt,
+                             **self.engine_kwargs).ask(query, top_k=limit)
+        response.metadata.update(stepback_query=stepback, stepback_principles=principles, method="step-back")
+        return response
