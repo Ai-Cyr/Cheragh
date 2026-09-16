@@ -12,6 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import logging
+import re
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -283,25 +284,86 @@ class StaticLLMClient(LLMClient):
 
 
 class ExtractiveLLMClient(LLMClient):
-    """Dependency-free fallback that returns the most relevant retrieved context."""
+    """Dependency-free fallback that quotes the first retrieved source.
+
+    This deterministic client extracts evidence rather than generating an
+    answer. It understands Cheragh's context headings and source markers.
+    """
 
     def generate(self, prompt: str, **kwargs: Any) -> str:
-        lines = [line.strip() for line in prompt.splitlines() if line.strip()]
-        context_lines = [
-            line for line in lines
-            if not line.lower().startswith(("question", "réponse", "reponse", "answer"))
+        context = prompt
+        heading = re.search(
+            r"^(?:extraits[^:\n]*|context|contexte|documents|sources|éléments)\s*:[ \t]*\n",
+            prompt,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if heading is not None:
+            context = prompt[heading.end():]
+        context = re.split(
+            r"\n[ \t]*\n(?:question|réponse|reponse|answer|résumé|resume|summary|prochaine phrase)\s*:",
+            context,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        # A source header must occupy its own line. The instructional example
+        # "Cite ... [source: doc_id]." is not retrieved evidence.
+        source_pattern = re.compile(r"^\[source:\s*([^\]\n]+)\][ \t]*$", flags=re.IGNORECASE | re.MULTILINE)
+        sources = list(source_pattern.finditer(context))
+        if heading is None and not sources:
+            # Keep the historical plain-text behavior for caller-owned
+            # templates that do not use Cheragh's context conventions.
+            lines = [line.strip() for line in prompt.splitlines() if line.strip()]
+            lines = [
+                line for line in lines
+                if not line.lower().startswith(("question", "réponse", "reponse", "answer"))
+            ]
+            return " ".join(lines[:4])[:1200] or "Aucun contexte exploitable fourni."
+
+        citation = ""
+        if sources:
+            first = sources[0]
+            context = context[first.end():sources[1].start() if len(sources) > 1 else len(context)]
+            citation = f" [source: {first.group(1).strip()}]"
+
+        lines = [
+            line.strip() for line in context.splitlines()
+            if line.strip() and line.strip() != "---" and not line.strip().lower().startswith("location:")
         ]
-        return " ".join(context_lines[:4])[:1200] or "Aucun contexte exploitable fourni."
+        excerpt = " ".join(lines)
+        if not excerpt:
+            return "Aucun contexte exploitable fourni."
+        # Reserve room for the complete citation instead of cutting its marker
+        # off when a long source reaches the answer's character limit.
+        available = 1200 - len(citation)
+        if available <= 0:
+            return excerpt[:1200]
+        return excerpt[:available].rstrip() + citation
 
 
 def cosine_similarity(query_vec: np.ndarray, doc_matrix: np.ndarray) -> np.ndarray:
-    """Cosine-like similarity for already-normalized vectors."""
+    """True cosine similarity, including providers that return non-unit vectors.
+
+    Zero vectors have similarity zero. Malformed/non-finite provider output is
+    rejected instead of silently producing arbitrary retrieval rankings.
+    """
     np = _numpy()
-    if query_vec.ndim == 1:
-        query_vec = query_vec[np.newaxis, :]
     if doc_matrix is None or len(doc_matrix) == 0:
         return np.array([])
-    return (doc_matrix @ query_vec.T).flatten()
+    query = np.asarray(query_vec, dtype=float)
+    matrix = np.asarray(doc_matrix, dtype=float)
+    if query.ndim == 2 and query.shape[0] == 1:
+        query = query[0]
+    if (query.ndim != 1 or matrix.ndim != 2 or query.size == 0 or
+            matrix.shape[1] != query.size or not np.isfinite(query).all() or not np.isfinite(matrix).all()):
+        raise ValueError("Cosine similarity requires finite query/document vectors of equal nonzero dimension")
+    # Scale first to avoid overflow for large but finite vectors.
+    query_scale = float(np.max(np.abs(query)))
+    query = query / query_scale if query_scale else query
+    scales = np.max(np.abs(matrix), axis=1, keepdims=True)
+    matrix = np.divide(matrix, scales, out=np.zeros_like(matrix), where=scales > 0)
+    norms = np.linalg.norm(matrix, axis=1) * np.linalg.norm(query)
+    scores = np.divide(matrix @ query, norms, out=np.zeros(matrix.shape[0]), where=norms > 0)
+    return np.clip(scores, -1.0, 1.0)
 
 
 def min_max_normalize(scores: np.ndarray) -> np.ndarray:

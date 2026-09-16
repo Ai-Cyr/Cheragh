@@ -22,6 +22,8 @@ import re
 from typing import Dict, List
 
 from .base import BaseRetriever, Document, LLMClient, _validate_top_k
+from .reranking import ReciprocalRankFusionReranker, _rrf_document_key
+from copy import deepcopy
 
 
 DECOMPOSITION_PROMPT_FR = """Décompose la question complexe suivante en {max_subquestions} sous-questions atomiques, indépendantes et simples à répondre.
@@ -55,7 +57,12 @@ class QueryDecompositionRetriever(BaseRetriever):
         llm_client: LLMClient,
         max_subquestions: int = 4,
         per_subquestion_top_k: int = 3,
+        *,
+        fusion: str = "rrf",
     ):
+        if fusion not in {"rrf", "max_score"}:
+            raise ValueError("fusion must be 'rrf' or 'max_score'")
+        self.fusion = fusion
         self.base_retriever = base_retriever
         self.llm_client = llm_client
         self.max_subquestions = _validate_top_k(max_subquestions, name="max_subquestions")
@@ -72,28 +79,32 @@ class QueryDecompositionRetriever(BaseRetriever):
         # 2) Retrieval par sous-question + agrégation du meilleur score
         seen: Dict[str, Document] = {}
         subquestion_map: Dict[str, List[str]] = {}  # doc_key -> [sub-questions ayant ramené ce doc]
+        ranked_lists = []
 
         for sub in subquestions:
             hits = self.base_retriever.retrieve(sub, top_k=self.per_subquestion_top_k)
+            ranked_lists.append(hits)
             for doc in hits:
-                key = doc.doc_id if doc.doc_id is not None else f"content::{hash(doc.content)}"
+                key = _rrf_document_key(doc)
                 # Garder le meilleur score
                 if key not in seen or (doc.score or 0) > (seen[key].score or 0):
                     seen[key] = doc
-                subquestion_map.setdefault(key, []).append(sub)
+                if sub not in subquestion_map.setdefault(key, []):
+                    subquestion_map[key].append(sub)
 
         # 3) Tri par score décroissant
-        merged = sorted(seen.values(), key=lambda d: d.score or 0, reverse=True)
+        merged = (ReciprocalRankFusionReranker().fuse(ranked_lists, top_k=top_k) if self.fusion == "rrf" else
+                  sorted(seen.values(), key=lambda d: d.score or 0, reverse=True))
 
         # 4) On enrichit les métadonnées avec les sous-questions ayant matché
         results: List[Document] = []
         for doc in merged[:top_k]:
-            key = doc.doc_id if doc.doc_id is not None else f"content::{hash(doc.content)}"
+            key = _rrf_document_key(doc)
             results.append(
                 Document(
                     content=doc.content,
                     metadata={
-                        **doc.metadata,
+                        **deepcopy(doc.metadata),
                         "matched_subquestions": subquestion_map.get(key, []),
                         "decomposed_from": query,
                     },
@@ -111,9 +122,16 @@ class QueryDecompositionRetriever(BaseRetriever):
             max_subquestions=self.max_subquestions, query=query
         )
         raw = self.llm_client.generate(prompt)
-        lines = [re.sub(r"^[\d\.\)\-\s•]+", "", line).strip() for line in raw.split("\n")]
-        subs = [line for line in lines if len(line) > 3][: self.max_subquestions]
+        lines = [re.sub(r"^\s*(?:\d+[.)]\s*|[-•]\s*)", "", line).strip() for line in raw.splitlines()]
+        subs = []
+        seen = set()
+        for line in lines:
+            if len(line) > 3 and line.casefold() not in seen:
+                seen.add(line.casefold())
+                subs.append(line)
+            if len(subs) >= self.max_subquestions:
+                break
         # Toujours inclure la question d'origine pour ne pas perdre de contexte
-        if query not in subs:
+        if query.casefold() not in seen:
             subs = [query] + subs
         return subs

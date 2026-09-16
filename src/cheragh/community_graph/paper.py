@@ -199,7 +199,8 @@ class LLMCommunitySummarizer:
             degree[triple.subject] += 1
             degree[triple.object] += 1
         evidence: list[dict[str, Any]] = [
-            {"source_id": triple.doc_id, "subject": triple.subject,
+            {"source_id": triple.doc_id, "source_doc_ids": triple.metadata.get("source_doc_ids", [triple.doc_id]),
+             "subject": triple.subject,
              "relation": triple.relation, "object": triple.object}
             for triple in sorted(community.triples,
                                  key=lambda item: (-degree[item.subject] - degree[item.object], _triple_sort_key(item)))
@@ -392,7 +393,7 @@ def global_map_reduce(
             raise ValueError("allowed_doc_ids must contain non-empty strings")
         allowed.intersection_update(provided)
     if principal is not None or access_policy is not None:
-        policy = access_policy or AccessPolicy()
+        policy = access_policy if access_policy is not None else AccessPolicy()
         allowed.intersection_update(
             document.doc_id for document in engine.documents if policy.authorize(document, principal).allowed
         )
@@ -500,7 +501,9 @@ def global_map_reduce(
         "selected_communities": sorted(int(report_id.split(":")[1]) for report_id in selected_ids),
         "map_points": deepcopy(accepted), "rejected_map_points": sum(count for _, count in results),
         "token_counter": "utf8_bytes" if token_counter is None else "injected",
-        "limitations": ["citation_ids_do_not_prove_entailment", "graph_extraction_is_caller_responsibility"],
+        "limitations": ["citation_ids_do_not_prove_entailment",
+                         "graph_extraction_is_caller_responsibility" if engine._rule_based_graph else
+                         "graph_extraction_quality_depends_on_model_and_corpus"],
     }
     if trace:
         trace.record_generation(prompt=prompt, answer=answer, model=getattr(client, "model", None))

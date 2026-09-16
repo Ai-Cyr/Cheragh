@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Iterable
 
-from ...base import Document
+from ...base import Document, _validate_non_negative_int, _validate_top_k
 
 
 @dataclass(frozen=True)
@@ -38,12 +39,13 @@ class RecursiveTextChunker:
     metadata_key: str = "chunk_index"
 
     def __post_init__(self) -> None:
-        if self.chunk_size <= 0:
-            raise ValueError("chunk_size must be > 0")
-        if self.chunk_overlap < 0:
-            raise ValueError("chunk_overlap must be >= 0")
+        _validate_top_k(self.chunk_size, name="chunk_size")
+        _validate_non_negative_int(self.chunk_overlap, name="chunk_overlap")
+        _validate_non_negative_int(self.min_chunk_size, name="min_chunk_size")
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size")
+        if any(not isinstance(separator, str) or not separator for separator in self.separators):
+            raise ValueError("separators must contain non-empty strings")
 
     def split_text(self, text: str) -> list[str]:
         return [chunk.text for chunk in self.split_text_with_offsets(text)]
@@ -52,18 +54,41 @@ class RecursiveTextChunker:
         clean, mapping = _normalize_whitespace_with_mapping(text)
         if not clean:
             return []
-        pieces = self._split_recursive(clean, self.separators)
-        chunks = [chunk.strip() for chunk in self._merge_pieces(pieces) if chunk.strip()]
-        kept = [chunk for chunk in chunks if len(chunk) >= self.min_chunk_size]
-        final_chunks = kept or chunks[:1]
-        return _locate_chunks(clean, mapping, final_chunks, overlap_hint=self.chunk_overlap)
+        # Work in source spans instead of rejoining strings and then guessing
+        # where repeated substrings occurred. Minimum size is a boundary
+        # preference: a short final fact must never be silently discarded.
+        chunks: list[TextChunk] = []
+        start = 0
+        while start < len(clean):
+            end = min(start + self.chunk_size, len(clean))
+            separator_skip = 0
+            if end < len(clean):
+                minimum = start + min(max(self.min_chunk_size, self.chunk_overlap + 1), self.chunk_size)
+                for separator in self.separators:
+                    found = clean.rfind(separator, minimum, end)
+                    if found >= minimum:
+                        end = found + len(separator) if self.keep_separator else found
+                        separator_skip = 0 if self.keep_separator else len(separator)
+                        break
+            left = start
+            while left < end and clean[left].isspace():
+                left += 1
+            right = end
+            while right > left and clean[right - 1].isspace():
+                right -= 1
+            if right > left:
+                chunks.append(TextChunk(clean[left:right], mapping[left], mapping[right - 1] + 1, left, right))
+            if end >= len(clean):
+                break
+            start = max(start + 1, end - self.chunk_overlap) if self.chunk_overlap else end + separator_skip
+        return chunks
 
     def split_documents(self, documents: Iterable[Document]) -> list[Document]:
         chunks: list[Document] = []
         for doc in documents:
             base_id = doc.doc_id or f"doc-{len(chunks)}"
             for index, chunk in enumerate(self.split_text_with_offsets(doc.content)):
-                metadata = dict(doc.metadata)
+                metadata = deepcopy(doc.metadata)
                 metadata[self.metadata_key] = index
                 metadata["parent_doc_id"] = base_id
                 metadata["source_char_start"] = chunk.source_char_start
@@ -149,9 +174,13 @@ def _normalize_whitespace_with_mapping(text: str) -> tuple[str, list[int]]:
     normalized_chars: list[str] = []
     mapping: list[int] = []
     i = 0
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
     while i < len(text):
         ch = text[i]
+        if ch == "\r":
+            normalized_chars.append("\n")
+            mapping.append(i)
+            i += 2 if text[i:i + 2] == "\r\n" else 1
+            continue
         if ch in " \t":
             start = i
             while i < len(text) and text[i] in " \t":

@@ -8,7 +8,9 @@ only when their adapters are instantiated.
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from copy import deepcopy
 import math
+import string
 from typing import Any
 
 from ..base import BaseRetriever, Document, _numpy, _validate_top_k
@@ -31,8 +33,8 @@ class LearnedSparseRetriever(BaseRetriever):
         return dense arrays, SciPy sparse matrices, PyTorch sparse tensors, or
         dictionaries mapping dimensions to weights.
     model_name:
-        A Sentence Transformers ``SparseEncoder`` model. It is loaded only when
-        ``encoder`` is omitted.
+        A Hugging Face SPLADE masked-language-model checkpoint. It is loaded
+        with masked log1p(ReLU) max pooling only when ``encoder`` is omitted.
     batch_size:
         Maximum number of inputs passed to the encoder in one call.
 
@@ -128,24 +130,27 @@ class ColBERTRetriever(BaseRetriever):
         documents: Iterable[Document],
         token_encoder: Any | None = None,
         *,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_name: str = "colbert-ir/colbertv2.0",
         batch_size: int = 16,
+        score_batch_size: int = 32,
         normalize: bool = True,
         model_kwargs: Mapping[str, Any] | None = None,
     ):
         _validate_batch_size(batch_size)
+        _validate_batch_size(score_batch_size)
         if not isinstance(model_name, str) or not model_name.strip():
             raise ValueError("model_name must be a non-empty string")
         if not isinstance(normalize, bool):
             raise TypeError("normalize must be a bool")
 
         self.batch_size = batch_size
+        self.score_batch_size = score_batch_size
         self.model_name = model_name
         self.normalize = normalize
         self.token_encoder = (
             token_encoder
             if token_encoder is not None
-            else SentenceTransformerTokenEncoder(model_name, model_kwargs=model_kwargs)
+            else ColBERTTokenEncoder(model_name, model_kwargs=model_kwargs)
         )
         _validate_encoder(self.token_encoder)
 
@@ -186,7 +191,7 @@ class ColBERTRetriever(BaseRetriever):
         )
         _merge_dimension(self._dimension, query_dimension, "query token encoder")
         query_vector = query_vectors[0]
-        scores = [_maxsim(query_vector, document_vector) for document_vector in self._document_vectors]
+        scores = _batched_maxsim(query_vector, self._document_vectors, batch_size=self.score_batch_size)
         order = sorted(range(len(scores)), key=lambda index: (-scores[index], index))[:top_k]
         return [_scored_copy(self.documents[index], scores[index], "colbert_maxsim") for index in order]
 
@@ -259,15 +264,210 @@ class SentenceTransformerTokenEncoder:
         return [prompt + text for text in texts] if prompt else texts
 
 
-def _load_sparse_encoder(model_name: str, model_kwargs: Mapping[str, Any] | None) -> Any:
+class SPLADEEncoder:
+    """SPLADE inference from the trained MLM head, without sentence pooling.
+
+    ``max`` pooling is SPLADE v2's default: max over attended positions of
+    log(1 + ReLU(vocabulary logits)). ``sum`` reproduces the original pooling
+    variant. Scores remain sparse dot products; embeddings are not normalized.
+    """
+
+    def __init__(
+        self,
+        model_name: str = LearnedSparseRetriever.DEFAULT_MODEL,
+        *,
+        model: Any | None = None,
+        tokenizer: Any | None = None,
+        max_length: int = 256,
+        pooling: str = "max",
+        device: str | None = None,
+        model_kwargs: Mapping[str, Any] | None = None,
+    ):
+        _validate_batch_size(max_length)
+        if pooling not in {"max", "sum"}:
+            raise ValueError("SPLADE pooling must be 'max' or 'sum'")
+        torch, transformers = _learned_dependencies()
+        kwargs = dict(model_kwargs or {})
+        device = kwargs.pop("device", device)
+        kwargs.setdefault("trust_remote_code", False)
+        if model is None:
+            model = transformers.AutoModelForMaskedLM.from_pretrained(model_name, **kwargs)
+        if tokenizer is None:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, **_tokenizer_kwargs(kwargs))
+        self.model = model.eval()
+        if device is not None:
+            self.model.to(device)
+        self.tokenizer = tokenizer
+        self.model_name = model_name
+        self.max_length = max_length
+        self.pooling = pooling
+        self._torch = torch
+
+    def encode_documents(self, texts: Sequence[str]) -> Any:
+        return self._encode(texts)
+
+    def encode_queries(self, texts: Sequence[str]) -> Any:
+        return self._encode(texts)
+
+    def _encode(self, texts: Sequence[str]) -> Any:
+        if not texts:
+            return _numpy().zeros((0, int(self.model.config.vocab_size)), dtype=float)
+        batch = self.tokenizer(
+            list(texts), padding=True, truncation=True, max_length=self.max_length, return_tensors="pt",
+        )
+        device = next(self.model.parameters()).device
+        batch = {key: value.to(device) for key, value in batch.items()}
+        with self._torch.inference_mode():
+            logits = self.model(**batch).logits
+            if logits.ndim != 3 or tuple(logits.shape[:2]) != tuple(batch["attention_mask"].shape):
+                raise ValueError("SPLADE model must return (batch, tokens, vocabulary) logits")
+            weights = self._torch.log1p(self._torch.relu(logits.float()))
+            weights = weights.masked_fill(~batch["attention_mask"].bool().unsqueeze(-1), 0)
+            pooled = weights.amax(dim=1) if self.pooling == "max" else weights.sum(dim=1)
+        return pooled.detach().cpu().numpy()
+
+
+class ColBERTTokenEncoder:
+    """Faithful BERT-based ColBERT/ColBERTv2 checkpoint inference.
+
+    Loads the checkpoint's BERT and learned linear projection together. Queries
+    use [Q]/[unused0] and fixed-length MASK augmentation, including non-attended
+    augmentation positions in MaxSim. Documents use [D]/[unused1], truncate to
+    ``document_max_length`` and remove padding and punctuation from scoring.
+    The defaults match ``colbert-ir/colbertv2.0``'s artifact.metadata. Other
+    model families require an explicit compatible token_encoder.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "colbert-ir/colbertv2.0",
+        *,
+        model: Any | None = None,
+        tokenizer: Any | None = None,
+        query_max_length: int = 32,
+        document_max_length: int = 180,
+        projection_dimension: int = 128,
+        mask_punctuation: bool = True,
+        attend_to_mask_tokens: bool = False,
+        device: str | None = None,
+        model_kwargs: Mapping[str, Any] | None = None,
+    ):
+        for value in (query_max_length, document_max_length, projection_dimension):
+            _validate_batch_size(value)
+        if min(query_max_length, document_max_length) < 3:
+            raise ValueError("ColBERT sequence lengths must leave room for CLS, role marker and SEP")
+        torch, transformers = _learned_dependencies()
+        kwargs = dict(model_kwargs or {})
+        device = kwargs.pop("device", device)
+        kwargs.setdefault("trust_remote_code", False)
+        if tokenizer is None:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, **_tokenizer_kwargs(kwargs))
+        if model is None:
+            config = transformers.AutoConfig.from_pretrained(model_name, **_tokenizer_kwargs(kwargs))
+            if config.model_type != "bert":
+                raise ValueError("ColBERTTokenEncoder supports BERT ColBERT checkpoints; inject another family explicitly")
+            checkpoint_class = _colbert_checkpoint_class(torch, transformers, projection_dimension)
+            model, loading = checkpoint_class.from_pretrained(
+                model_name, config=config, output_loading_info=True, **kwargs,
+            )
+            if loading.get("missing_keys") or loading.get("mismatched_keys"):
+                raise ValueError("Checkpoint is missing trained ColBERT weights (BERT and linear projection required)")
+        self.model = model.eval()
+        if device is not None:
+            self.model.to(device)
+        self.tokenizer = tokenizer
+        self.model_name = model_name
+        self.query_max_length = query_max_length
+        self.document_max_length = document_max_length
+        self.attend_to_mask_tokens = attend_to_mask_tokens
+        self._torch = torch
+        self.query_marker = tokenizer.convert_tokens_to_ids("[unused0]")
+        self.document_marker = tokenizer.convert_tokens_to_ids("[unused1]")
+        if (
+            self.query_marker in {None, tokenizer.unk_token_id}
+            or self.document_marker in {None, tokenizer.unk_token_id}
+            or tokenizer.mask_token_id is None or tokenizer.pad_token_id is None
+        ):
+            raise ValueError("ColBERT tokenizer must provide role markers, MASK and PAD tokens")
+        self.skip_ids = {
+            int(token_id)
+            for symbol in string.punctuation
+            for token_id in tokenizer.encode(symbol, add_special_tokens=False)
+        } if mask_punctuation else set()
+
+    def encode_documents(self, texts: Sequence[str]) -> list[Any]:
+        return self._encode(texts, query=False)
+
+    def encode_queries(self, texts: Sequence[str]) -> list[Any]:
+        return self._encode(texts, query=True)
+
+    def _encode(self, texts: Sequence[str], *, query: bool) -> list[Any]:
+        if not texts:
+            return []
+        torch = self._torch
+        length = self.query_max_length if query else self.document_max_length
+        batch = self.tokenizer(
+            list(texts), padding="max_length" if query else "longest",
+            truncation=True, max_length=length - 1, return_tensors="pt",
+        )
+        # Insert the learned role marker immediately after CLS, retaining SEP.
+        input_ids = batch["input_ids"]
+        marker = torch.full((len(texts), 1), self.query_marker if query else self.document_marker, dtype=input_ids.dtype)
+        batch["input_ids"] = torch.cat((input_ids[:, :1], marker, input_ids[:, 1:]), dim=1)
+        for name in ("attention_mask", "token_type_ids"):
+            if name in batch:
+                fill = 1 if name == "attention_mask" else 0
+                column = torch.full((len(texts), 1), fill, dtype=batch[name].dtype)
+                batch[name] = torch.cat((batch[name][:, :1], column, batch[name][:, 1:]), dim=1)
+        if query:
+            padding = batch["input_ids"] == self.tokenizer.pad_token_id
+            batch["input_ids"][padding] = self.tokenizer.mask_token_id
+            if self.attend_to_mask_tokens:
+                batch["attention_mask"][padding] = 1
+            # Attention masking and scoring masking intentionally differ: MASK
+            # augmentation vectors participate in MaxSim even without attention.
+            score_mask = torch.ones_like(batch["input_ids"], dtype=torch.bool)
+        else:
+            score_mask = batch["attention_mask"].bool()
+            for token_id in self.skip_ids:
+                score_mask &= batch["input_ids"] != token_id
+        device = next(self.model.parameters()).device
+        batch = {key: value.to(device) for key, value in batch.items()}
+        with torch.inference_mode():
+            vectors = self.model(**batch)
+            vectors = torch.nn.functional.normalize(vectors.float(), p=2, dim=-1).cpu()
+        return [vectors[index][score_mask[index]].numpy().copy() for index in range(len(texts))]
+
+
+def _colbert_checkpoint_class(torch: Any, transformers: Any, dimension: int) -> Any:
+    class ColBERTCheckpoint(transformers.BertPreTrainedModel):
+        def __init__(self, config):
+            super().__init__(config)
+            self.bert = transformers.BertModel(config)
+            self.linear = torch.nn.Linear(config.hidden_size, dimension, bias=False)
+            self.post_init()
+
+        def forward(self, **tokens):
+            return self.linear(self.bert(**tokens).last_hidden_state)
+
+    return ColBERTCheckpoint
+
+
+def _learned_dependencies() -> tuple[Any, Any]:
     try:
-        from sentence_transformers import SparseEncoder
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        raise ImportError(
-            "LearnedSparseRetriever without an injected encoder requires a recent "
-            "'sentence-transformers' with SparseEncoder support."
-        ) from exc
-    return SparseEncoder(model_name, **dict(model_kwargs or {}))
+        import torch
+        import transformers
+    except ImportError as exc:  # pragma: no cover - optional dependencies
+        raise ImportError("Learned encoders require torch and transformers. Install: pip install cheragh[learned-retrieval]") from exc
+    return torch, transformers
+
+
+def _tokenizer_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    return {name: kwargs[name] for name in ("cache_dir", "revision", "token", "local_files_only", "trust_remote_code") if name in kwargs}
+
+
+def _load_sparse_encoder(model_name: str, model_kwargs: Mapping[str, Any] | None) -> Any:
+    return SPLADEEncoder(model_name, model_kwargs=model_kwargs)
 
 
 def _copy_documents(documents: Iterable[Document]) -> list[Document]:
@@ -286,7 +486,7 @@ def _copy_documents(documents: Iterable[Document]) -> list[Document]:
         copied.append(
             Document(
                 content=document.content,
-                metadata=dict(document.metadata or {}),
+                metadata=deepcopy(document.metadata or {}),
                 doc_id=document.doc_id,
                 score=document.score,
             )
@@ -490,7 +690,7 @@ def _token_rows(value: Any, *, expected_count: int, normalize: bool) -> list[Any
     dimension: int | None = None
     validated: list[Any] = []
     for index, row in enumerate(rows):
-        row = np.asarray(row, dtype=float)
+        row = np.array(row, dtype=float, copy=True)
         if row.ndim != 2:
             raise ValueError(f"token encoder output {index} must have shape (tokens, dimensions)")
         if row.shape[0] == 0 or row.shape[1] == 0:
@@ -548,6 +748,8 @@ def _split_token_array(array: Any, expected_count: int) -> list[Any]:
 def _as_numpy(value: Any) -> Any:
     detached = value.detach() if callable(getattr(value, "detach", None)) else value
     on_cpu = detached.cpu() if callable(getattr(detached, "cpu", None)) else detached
+    if str(getattr(on_cpu, "dtype", "")) == "torch.bfloat16":
+        on_cpu = on_cpu.float()
     raw = on_cpu.numpy() if callable(getattr(on_cpu, "numpy", None)) else on_cpu
     try:
         return _numpy().asarray(raw)
@@ -568,8 +770,26 @@ def _maxsim(query_vectors: Any, document_vectors: Any) -> float:
     return float(similarities.max(axis=1).sum())
 
 
+def _batched_maxsim(query_vectors: Any, documents: Sequence[Any], *, batch_size: int) -> list[float]:
+    np = _numpy()
+    scores: list[float] = []
+    for start in range(0, len(documents), batch_size):
+        group = documents[start : start + batch_size]
+        width = max(document.shape[0] for document in group)
+        padded = np.zeros((len(group), width, query_vectors.shape[1]), dtype=query_vectors.dtype)
+        valid = np.zeros((len(group), width), dtype=bool)
+        for index, document in enumerate(group):
+            padded[index, :len(document)] = document
+            valid[index, :len(document)] = True
+        similarities = np.einsum("qd,btd->bqt", query_vectors, padded)
+        # Padding must never beat a real negative similarity.
+        similarities = np.where(valid[:, None, :], similarities, -np.inf)
+        scores.extend(float(value) for value in similarities.max(axis=2).sum(axis=1))
+    return scores
+
+
 def _scored_copy(document: Document, score: float, retrieval_method: str) -> Document:
-    metadata = dict(document.metadata or {})
+    metadata = deepcopy(document.metadata or {})
     metadata["retrieval_method"] = retrieval_method
     return Document(
         content=document.content,
@@ -581,7 +801,9 @@ def _scored_copy(document: Document, score: float, retrieval_method: str) -> Doc
 
 __all__ = [
     "ColBERTRetriever",
+    "ColBERTTokenEncoder",
     "LearnedSparseRetriever",
     "SPLADERetriever",
+    "SPLADEEncoder",
     "SentenceTransformerTokenEncoder",
 ]

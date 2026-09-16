@@ -8,8 +8,12 @@ from .engine import (
     RetrievalAction,
     RetrievalGrade,
 )
+from .semantic import CrossEncoderRetrievalGrader, LogisticCalibration, SemanticKnowledgeRefiner
 
 __all__ = [
+    "CrossEncoderRetrievalGrader",
+    "LogisticCalibration",
+    "SemanticKnowledgeRefiner",
     "CorrectiveRAGEngine",
     "CorrectiveRAGResult",
     "KnowledgeRefiner",

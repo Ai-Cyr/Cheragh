@@ -28,8 +28,10 @@ class V101PersistenceHardeningTests(unittest.TestCase):
             child_chunk_overlap=0,
         )
 
-        self.assertEqual(first_document.doc_id, expected_id)
-        self.assertEqual(second_document.doc_id, expected_id)
+        self.assertIsNone(first_document.doc_id)
+        self.assertIsNone(second_document.doc_id)
+        self.assertEqual(first.retrieve(content, top_k=1)[0].doc_id, expected_id)
+        self.assertEqual(second.retrieve(content, top_k=1)[0].doc_id, expected_id)
         self.assertEqual(first.child_documents[0].metadata["parent_id"], expected_id)
         self.assertEqual(second.child_documents[0].doc_id, f"{expected_id}::child::0")
 

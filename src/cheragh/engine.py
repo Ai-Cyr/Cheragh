@@ -26,6 +26,7 @@ from .base import (
     _snapshot_document,
     _validate_top_k,
 )
+from ._streaming import _iterate_in_worker
 from .citations import extract_citations, validate_citations
 from .hybrid_search import BM25Retriever, HybridSearchRetriever
 from .schema import RAGResponse, Source
@@ -787,9 +788,18 @@ class RAGEngine:
         )
 
     async def astream(self, query: str, top_k: int | None = None, **generate_kwargs: Any):
-        """Async streaming wrapper. Yields chunks from the synchronous stream."""
-        for chunk in self.stream(query, top_k=top_k, **generate_kwargs):
-            yield chunk
+        """Stream without blocking the event loop on synchronous providers.
+
+        Close the async iterator when abandoning a stream. Cancellation closes
+        an active provider as soon as its current synchronous call returns;
+        provider network timeouts still bound that call.
+        """
+        stream = _iterate_in_worker(self.stream(query, top_k=top_k, **generate_kwargs))
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await stream.aclose()
 
     def _query_variants(self, query: str, trace: RAGTrace | None) -> list[str]:
         if self.query_transformer is None:

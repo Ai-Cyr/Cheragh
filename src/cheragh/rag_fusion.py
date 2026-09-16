@@ -16,9 +16,11 @@ Formule RRF : score(d) = Σ 1 / (k + rank_i(d))  — k=60 par défaut.
 """
 from __future__ import annotations
 
-from typing import Dict, List
+import re
+from typing import List
 
 from .base import BaseRetriever, Document, LLMClient, _validate_top_k
+from .reranking import ReciprocalRankFusionReranker
 
 
 MULTI_QUERY_PROMPT_FR = """Tu es un assistant spécialisé en recherche d'information.
@@ -88,36 +90,24 @@ class RAGFusionRetriever(BaseRetriever):
     def _generate_queries(self, query: str) -> List[str]:
         prompt = MULTI_QUERY_PROMPT_FR.format(n_queries=self.n_queries, query=query)
         raw = self.llm_client.generate(prompt)
-        variants = [line.strip(" -•\t") for line in raw.split("\n") if line.strip()]
-        variants = [v for v in variants if len(v) > 3][: self.n_queries]
-        # On ajoute toujours la question originale pour ne pas perdre d'info
-        return [query] + variants
+        variants = [query]
+        seen = {query.strip().casefold()}
+        for line in raw.splitlines():
+            variant = re.sub(r"^\s*(?:\d+[.)]\s*|[-•]\s*)", "", line).strip()
+            if len(variant) <= 3 or variant.casefold() in seen:
+                continue
+            seen.add(variant.casefold())
+            variants.append(variant)
+            if len(variants) > self.n_queries:
+                break
+        return variants
 
     def _reciprocal_rank_fusion(self, result_lists: List[List[Document]]) -> List[Document]:
         """RRF : chaque document reçoit 1/(k + rang) dans chaque liste où il apparaît."""
-        rrf_scores: Dict[str, float] = {}
-        doc_lookup: Dict[str, Document] = {}
-
-        for results in result_lists:
-            for rank, doc in enumerate(results):
-                # Clé stable : doc_id si dispo, sinon hash du contenu
-                key = doc.doc_id if doc.doc_id is not None else f"content::{hash(doc.content)}"
-                rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (self.rrf_k + rank + 1)
-                # Garder la première occurrence comme document de référence
-                if key not in doc_lookup:
-                    doc_lookup[key] = doc
-
-        # Tri et construction des documents finaux avec score RRF
-        ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-        fused: List[Document] = []
-        for key, rrf_score in ranked:
-            original = doc_lookup[key]
-            fused.append(
-                Document(
-                    content=original.content,
-                    metadata={**original.metadata, "original_score": original.score},
-                    doc_id=original.doc_id,
-                    score=float(rrf_score),
-                )
-            )
+        count = sum(len(results) for results in result_lists)
+        if not count:
+            return []
+        fused = ReciprocalRankFusionReranker(k=self.rrf_k).fuse(result_lists, top_k=count)
+        for document in fused:
+            document.metadata["original_score"] = document.metadata["first_stage_score"]
         return fused

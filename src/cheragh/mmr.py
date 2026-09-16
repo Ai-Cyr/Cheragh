@@ -4,10 +4,11 @@ Technique 10 : MMR — version persistable (mode autonome uniquement).
 from __future__ import annotations
 
 from typing import List, Optional
+from copy import deepcopy
 
 import numpy as np
 
-from .base import BaseRetriever, Document, EmbeddingModel, _validate_top_k, cosine_similarity
+from .base import BaseRetriever, Document, EmbeddingModel, _snapshot_documents, _validate_top_k, cosine_similarity
 from .cache import hash_documents, embedder_fingerprint, load_cache, save_cache
 
 
@@ -30,7 +31,7 @@ class MMRRetriever(BaseRetriever):
             raise ValueError("lambda_mult doit être dans [0, 1].")
 
         self.embedding_model = embedding_model
-        self.documents = documents
+        self.documents = _snapshot_documents(documents) if documents is not None else None
         self.base_retriever = base_retriever
         self.lambda_mult = lambda_mult
         self.fetch_k = _validate_top_k(fetch_k, name="fetch_k")
@@ -50,13 +51,13 @@ class MMRRetriever(BaseRetriever):
         query_vec = self.embedding_model.embed_query(query)
 
         if self.base_retriever is not None:
-            candidates = self.base_retriever.retrieve(query, top_k=self.fetch_k)
+            candidates = self.base_retriever.retrieve(query, top_k=max(top_k, self.fetch_k))
             if not candidates:
                 return []
             cand_embeddings = self.embedding_model.embed_documents([d.content for d in candidates])
         else:
             scores = cosine_similarity(query_vec, self.doc_embeddings)
-            top_idx = np.argsort(scores)[::-1][: self.fetch_k]
+            top_idx = np.argsort(-scores, kind="stable")[: max(top_k, self.fetch_k)]
             candidates = [self.documents[i] for i in top_idx]
             cand_embeddings = self.doc_embeddings[top_idx]
 
@@ -72,7 +73,7 @@ class MMRRetriever(BaseRetriever):
                 best_score = -np.inf
                 best = remaining[0]
                 for i in remaining:
-                    sim_to_selected = cand_embeddings[i] @ selected_embs.T
+                    sim_to_selected = cosine_similarity(cand_embeddings[i], selected_embs)
                     max_redundancy = float(np.max(sim_to_selected))
                     mmr = self.lambda_mult * float(relevance[i]) - (1 - self.lambda_mult) * max_redundancy
                     if mmr > best_score:
@@ -85,7 +86,7 @@ class MMRRetriever(BaseRetriever):
             Document(
                 content=candidates[i].content,
                 metadata={
-                    **candidates[i].metadata,
+                    **deepcopy(candidates[i].metadata),
                     "mmr_rank": rank,
                     "relevance_to_query": float(relevance[i]),
                 },

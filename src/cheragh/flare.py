@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import hashlib
 import math
 from numbers import Real
 from typing import Dict, List, Protocol
@@ -348,7 +349,7 @@ class FLAREPipeline:
                 raise TypeError("draft_generator must return ConfidenceDraft")
             draft = generated.text.strip() if generated is not None else self.llm_client.generate(draft_prompt).strip()
 
-            if "[DONE]" in draft or not draft:
+            if draft == "[DONE]" or not draft:
                 break
 
             # 2) Retrieval guided by uncertainty in the look-ahead draft.
@@ -406,7 +407,7 @@ class FLAREPipeline:
                 # Pas de retrieval → on garde le brouillon tel quel
                 final_sentence = draft
 
-            if "[DONE]" in final_sentence or not final_sentence:
+            if final_sentence == "[DONE]" or not final_sentence:
                 break
 
             # 4) Ajout à la réponse et accumulation des sources
@@ -428,10 +429,6 @@ class FLAREPipeline:
                 "n_retrieved": len(hits),
                 "final_sentence": final_sentence,
             })
-
-            # Heuristique d'arrêt : si la phrase est une conclusion, on stoppe
-            if any(tok in final_sentence.lower() for tok in ["en conclusion", "en résumé", "[done]"]):
-                break
 
         documents = list(all_sources.values())
         return {
@@ -473,7 +470,10 @@ def _validated_hits(documents: Sequence[Document], *, top_k: int) -> list[Docume
                 raise TypeError(f"retrieved documents[{index}].score must be a real number or None")
             if not math.isfinite(float(document.score)):
                 raise ValueError(f"retrieved documents[{index}].score must be finite")
-        snapshots.append(_snapshot_document(document))
+        snapshot = _snapshot_document(document)
+        if not snapshot.doc_id:
+            snapshot.doc_id = f"flare::{hashlib.sha256(snapshot.content.encode('utf-8')).hexdigest()}"
+        snapshots.append(snapshot)
     return snapshots
 
 

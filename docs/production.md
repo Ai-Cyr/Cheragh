@@ -12,6 +12,19 @@ Cela supprime les collisions liées aux deux-points et empêche l'invalidation
 d'un namespace de supprimer celui d'un autre. La mise à jour démarre avec un
 cache froid : prévoir temporairement davantage d'appels aux fournisseurs.
 
+Les clés produites par `make_cache_key()` utilisent également un format v2
+qui distingue les types et les limites des valeurs. Les wrappers de cache
+démarrent donc avec des entrées froides après la mise à jour, quel que soit le
+backend. Aucune purge automatique n'est effectuée. Les anciennes valeurs JSON
+ordinaires restent lisibles; les nouveaux dictionnaires contenant la clé
+`__cheragh_type__` sont échappés pour préserver leurs métadonnées.
+Les clés des retrievers composés incluent aussi le principal, ses permissions,
+la politique d'accès courante et la portée tenant/collection afin qu'un cache
+partagé ne réutilise pas les documents autorisés d'un autre utilisateur.
+Les résultats soumis à une politique personnalisée ou opaque ne sont pas mis
+en cache lorsque son état d'autorisation ne peut pas être représenté de façon
+fiable. Cette précaution s'applique aussi si un fingerprint explicite est fourni.
+
 Les anciennes clés ne sont ni lues, ni migrées, ni supprimées automatiquement.
 Leurs TTL expirent normalement. Les clés sans TTL restent présentes : prévoir
 un nettoyage explicitement vérifié après l'arrêt des anciens workers. Les
@@ -24,6 +37,21 @@ transport, y compris à l'abandon du consommateur. Le serveur conserve le
 contexte de requête et la réservation de capacité jusqu'à la fin d'un appel
 en cours. Cela ne permet pas d'interrompre de force un fournisseur bloqué :
 configurer aussi ses timeouts réseau.
+
+## Migration des méthodes de retrieval
+
+Cette révision corrige des calculs et peut donc modifier l’ordre des résultats :
+
+- `cosine_similarity` calcule un vrai cosinus même si les embeddings ne sont pas normalisés ; HyDE utilise le produit scalaire du papier par défaut (`similarity="cosine"` reste explicite).
+- HyQE combine désormais les scores contexte/questions au lieu du maximum d’un index mixte. `HyQEReranker` expose le classement de candidats ; les caches concernés démarrent à froid.
+- BM25 utilise une formule à IDF positif indépendante de l’installation de `rank-bm25`. Recalibrer les seuils portant sur les scores absolus.
+- `QueryDecompositionRetriever` et `FederatedRetriever` fusionnent les rangs par défaut. Les modes historiques restent accessibles par `fusion="max_score"` et `fusion="score"` respectivement.
+- La compression extractive vérifie les phrases par défaut. Les sorties qui paraphrasent ou omettent une négation sont refusées ; `validate_extraction=False` désactive explicitement cette vérification.
+- Self-query exige un objet JSON avec les deux clés `cleaned_query` et `filters`, sans clés dupliquées ni valeurs non finies. Un filtre mal formé provoque une erreur au lieu d’élargir silencieusement la recherche.
+- Les retrievers copient les documents fournis. Récupérer les identifiants générés dans les résultats/index plutôt que compter sur une mutation du document appelant.
+- La reconstruction de parents exige des métadonnées source cohérentes entre enfants. Fournir un parent explicite en cas de différences. Les résumés et rapports sont autorisés seulement si toutes leurs sources le sont.
+
+Les nouveaux modèles restent optionnels. Installer uniquement les extras retenus et versionner poids, tokenizers, calibration et données. Les [recettes de recherche](research_recipes.md) expliquent les chemins complets et les [résultats de vérification](research_validation.md) leur portée.
 
 ## Responsabilités de la plateforme
 
@@ -42,24 +70,34 @@ risques, mais ne prouvent ni la véracité d'une réponse ni l'absence de fuite.
 
 Les dépendances de build sont figées dans `pyproject.toml`. La CI construit la
 wheel et la source distribution, exécute `twine check`, puis installe chacun des
-deux artefacts dans un environnement vierge. Reproduisez ce contrôle avant une
-publication :
+deux artefacts dans un environnement vierge. Chaque installation exécute une
+indexation, une relecture de l'index et une requête hors du dépôt, sans fournisseur
+externe. Les artefacts validés et leurs hashes sont conservés pendant 30 jours
+dans `cheragh-dist-<SHA-du-commit>` sur la page du run GitHub Actions. Reproduisez
+ce contrôle avant une publication :
 
 ```bash
 python -m venv .venv-release
 . .venv-release/bin/activate
 python -m pip install "pip==26.2.1" "build==1.5.0" "twine==7.0.0"
 python -m build
-python -m twine check dist/*
-python -m pip install dist/*.whl
+python -m twine check dist/*.whl dist/*.tar.gz
+python -m pip install --only-binary=:all: dist/*.whl
 python -m pip check
-cheragh --help
-sha256sum dist/* > dist/SHA256SUMS
+python -I scripts/smoke_distribution.py
+(cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS)
 ```
 
 Publiez exactement les artefacts validés par la CI ; ne reconstruisez pas la
 wheel entre validation et publication. Conservez leurs sommes SHA-256 avec les
-informations de version et de provenance du build.
+informations de version et de provenance du build. Après téléchargement,
+exécutez `sha256sum --check SHA256SUMS` dans le dossier des artefacts et vérifiez
+que tous les jobs du run retenu sont verts. Une PR peut produire des artefacts :
+seuls ceux du commit de release approuvé doivent être publiés.
+
+La source distribution contient aussi les tests, scripts de vérification,
+workflows, Dockerfile et guides nécessaires pour reproduire ces contrôles sans
+checkout Git. La wheel ne contient que le paquet et ses métadonnées.
 
 ### Verrouiller les dépendances d'un déploiement
 
@@ -78,8 +116,10 @@ python -m pip install --require-hashes -r requirements.lock
 python -m pip check
 ```
 
-La CI exécute `pip-audit` sur les dépendances du noyau. Auditez également le
-lockfile correspondant aux extras réellement déployés :
+La CI exécute `pip-audit` sur les dépendances du noyau et sur toutes les
+dépendances résolues du profil serveur `fastapi,config` avec les contraintes de
+l'image Docker. Auditez également le lockfile correspondant aux autres extras
+réellement déployés :
 
 ```bash
 python -m pip install "pip-audit==2.10.1"
@@ -122,8 +162,16 @@ docker build \
 Le build accepte aussi `CHERAGH_EXTRAS`; la valeur par défaut est
 `fastapi,config`. Gardez uniquement les intégrations nécessaires. Les versions
 directes utilisées par l'image sont contraintes dans `docker/constraints.txt`.
-Pour une reproductibilité complète, remplacez ce fichier dans votre pipeline
-par le lockfile à hashes validé pour la plateforme cible.
+Pour une reproductibilité complète, générez un lockfile à hashes pour la
+plateforme cible, installez-le explicitement avec `--require-hashes`, puis
+installez la wheel validée avec `--no-deps`. Remplacer un fichier passé à
+`--constraint` ne suffit pas à activer la vérification des hashes.
+
+La CI démarre aussi l'image avec un index local de test, un filesystem en lecture
+seule et les restrictions du profil de production. Elle vérifie `/ready`,
+l'authentification, une requête réelle, le refus de l'indexation HTTP et l'arrêt
+propre sur SIGTERM. Ce test utilise les embeddings locaux et la génération
+extractive ; il ne valide pas un fournisseur distant ni votre corpus.
 
 Le `docker-compose.yml` démarre uniquement Cheragh : le serveur par défaut lit
 un `MemoryVectorStore` local et ne consomme pas Qdrant. Pour utiliser Qdrant,
@@ -162,7 +210,8 @@ publie l'API que sur la boucle locale :
 ```bash
 export CHERAGH_API_KEY="$(commande-du-gestionnaire-de-secrets)"
 install -d -m 0750 data
-sudo chown 10001:10001 data
+cheragh index ./corpus --output ./data/.cheragh_index
+sudo chown -R 10001:10001 data
 docker compose up --build --detach
 ```
 
@@ -170,6 +219,10 @@ Avec Docker rootless ou un remappage d'UID, remplacez `10001:10001` par les
 identifiants hôte correspondant au processus du conteneur. Vérifiez les droits
 sur un index préparé avant le démarrage ; ne rendez pas le volume accessible à
 tous pour contourner une erreur de permission.
+Les fichiers de snapshot et de verrou sont créés avec des permissions privées :
+changer uniquement le propriétaire du répertoire `data` ne suffit pas. Préparez
+l'index avec l'UID de service, ou transférez aussi la propriété de ses fichiers
+comme dans l'exemple ci-dessus.
 
 Placez le reverse proxy TLS sur le même hôte ou adaptez explicitement le réseau
 Compose. Ne remplacez pas le binding `127.0.0.1` par `0.0.0.0` sans passerelle.
@@ -368,6 +421,12 @@ les quotas des fournisseurs.
   quotas LLM approchent de leur limite.
 - Bornez `top_k`, la taille des documents, le budget de contexte et le nombre
   d'étapes agentiques ou multi-hop.
+
+La portée tenant et collection sélectionnée pour une requête reste obligatoire,
+y compris pour un compte administrateur ou autorisé sur plusieurs tenants.
+Les politiques d'accès personnalisées déjà configurées sur le retriever sont
+conservées et s'appliquent en plus de cette portée. Vérifiez ces deux niveaux
+d'isolation dans vos tests métier, y compris lors d'un hit de cache.
 
 Testez charge nominale, pic, panne partielle et reprise. Les objectifs doivent
 couvrir au minimum p50/p95/p99, taux d'erreur, saturation, coût par requête et

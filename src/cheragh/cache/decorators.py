@@ -53,7 +53,14 @@ class CachedEmbeddingModel(EmbeddingModel):
 
     def embed_query(self, text: str):
         key = make_cache_key("query", self.cache_fingerprint, text)
-        return self.cache.get_or_set(key, lambda: self.model.embed_query(text), ttl=self.ttl, namespace=self.namespace)
+        vector = self.cache.get_or_set(
+            key,
+            lambda: _embedding_snapshot(self.model.embed_query(text), ndim=1),
+            ttl=self.ttl,
+            namespace=self.namespace,
+        )
+        # Neither callers nor providers own the array retained by MemoryCache.
+        return _embedding_snapshot(vector, ndim=1)
 
     def embed_documents(self, texts: list[str]):
         # Cache per text to maximize reuse across incremental ingestion and retrieval.
@@ -75,16 +82,42 @@ class CachedEmbeddingModel(EmbeddingModel):
                 missing_indices.append(i)
                 missing_texts.append(text)
             else:
-                outputs.append(value)
+                outputs.append(_embedding_snapshot(value, ndim=1))
         if missing_texts:
-            embedded = self.model.embed_documents(missing_texts)
+            embedded = _embedding_snapshot(self.model.embed_documents(missing_texts), ndim=2)
+            if embedded.shape[0] != len(missing_texts):
+                raise ValueError(
+                    "Invalid embedding batch: expected "
+                    f"{len(missing_texts)} rows, received {embedded.shape[0]}"
+                )
+            if any(vector is not None and vector.shape[0] != embedded.shape[1] for vector in outputs):
+                raise ValueError("Invalid embedding batch: dimension differs from cached vectors")
+            # Validate the complete provider response before populating any key;
+            # a truncated/malformed batch must not poison subsequent requests.
             for idx, vector in zip(missing_indices, embedded):
                 outputs[idx] = vector
-                self.cache.set(keys[idx], vector, ttl=self.ttl, namespace=self.namespace)
+                self.cache.set(keys[idx], vector.copy(), ttl=self.ttl, namespace=self.namespace)
         return np.vstack(outputs)
 
     def get_fingerprint(self) -> str:
         return f"Cached::{self.model.get_fingerprint()}"
+
+
+def _embedding_snapshot(value: Any, *, ndim: int):
+    """Validate cached/provider vectors and detach their mutable storage."""
+    import numpy as np
+
+    array = np.asarray(value)
+    if array.ndim != ndim or array.shape[-1] == 0:
+        raise ValueError(f"Invalid embedding shape: expected {ndim} dimensions, received {array.shape}")
+    if (
+        not np.issubdtype(array.dtype, np.number)
+        or np.issubdtype(array.dtype, np.bool_)
+        or np.issubdtype(array.dtype, np.complexfloating)
+        or not bool(np.isfinite(array).all())
+    ):
+        raise ValueError("Invalid embedding: expected finite real numeric values")
+    return array.copy()
 
 
 class CachedRetriever(BaseRetriever):
@@ -114,9 +147,15 @@ class CachedRetriever(BaseRetriever):
         return _retriever_fingerprint(self.retriever)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        authorization, authorization_complete = _retriever_authorization_snapshot(self.retriever, seen=set())
+        if not authorization_complete:
+            # Custom policies may consult an external ACL or closure. Cache the
+            # underlying raw retriever instead, so authorization runs each time.
+            return _snapshot_documents(self.retriever.retrieve(query, top_k=top_k))
         key = make_cache_key(
             self.retriever.__class__.__name__,
             self.fingerprint,
+            authorization,
             query,
             top_k,
             getattr(self.retriever, "filters", None),
@@ -267,11 +306,23 @@ def _retriever_snapshot(retriever: Any, *, seen: set[int]) -> str:
 
     config_snapshot, config_complete = _selected_attributes(
         retriever,
-        ("alpha", "filters", "first_stage_top_k", "normalize", "distance", "collection_name"),
+        (
+            "alpha", "filters", "first_stage_top_k", "normalize", "distance", "collection_name",
+            "tenant_id", "collection_id", "overfetch_factor", "max_candidates",
+        ),
     )
     if config_snapshot:
         snapshot["config"] = config_snapshot
     complete = complete and config_complete
+
+    # Authorization wrappers can share the same corpus while returning disjoint
+    # results. Include the *current* principal and policy so switching users or
+    # revoking a permission cannot hit another authorization context's cache.
+    for name in ("principal", "policy"):
+        if hasattr(retriever, name):
+            security_snapshot, security_complete = _authorization_snapshot(getattr(retriever, name), seen=set())
+            snapshot[name] = security_snapshot
+            complete = complete and security_complete
 
     tokenizer = getattr(retriever, "tokenizer", None)
     if tokenizer is not None:
@@ -295,6 +346,71 @@ def _retriever_snapshot(retriever: Any, *, seen: set[int]) -> str:
     if not stable_source or not complete or not _is_package_component(retriever):
         snapshot["instance"] = object_id
     return make_cache_key("retriever", snapshot)
+
+
+def _authorization_snapshot(value: Any, *, seen: set[int]) -> tuple[Any, bool]:
+    from ..security import AccessPolicy, Principal
+
+    if not isinstance(value, (AccessPolicy, Principal)):
+        _, complete = _safe_snapshot(value)
+        return make_cache_key(value), complete
+    identity = id(value)
+    if identity in seen:
+        return {"class": _class_name(value), "instance": identity}, False
+    seen.add(identity)
+    snapshot: dict[str, Any] = {"class": _class_name(value)}
+    complete = True
+    for name, item in vars(value).items():
+        if isinstance(item, (AccessPolicy, Principal)):
+            item_snapshot, item_complete = _authorization_snapshot(item, seen=seen)
+        else:
+            _, item_complete = _safe_snapshot(item)
+            # _safe_snapshot is only a completeness check here. Its readable
+            # representation normalizes some types; authorization must retain
+            # distinctions such as numeric versus string metadata constraints.
+            item_snapshot = make_cache_key(item)
+        snapshot[name] = item_snapshot
+        complete = complete and item_complete
+    if type(value) not in {AccessPolicy, Principal}:
+        # Even empty custom policy state may read an external ACL or closure.
+        # An instance discriminator cannot make such a decision cacheable.
+        snapshot["instance"] = identity
+        complete = False
+    return snapshot, complete
+
+
+def _retriever_authorization_snapshot(retriever: Any, *, seen: set[int]) -> tuple[dict[str, Any], bool]:
+    """Inspect access boundaries independently of an explicit corpus fingerprint."""
+    identity = id(retriever)
+    if identity in seen:
+        return {}, True
+    seen.add(identity)
+    snapshot: dict[str, Any] = {}
+    complete = True
+    for name in ("principal", "policy", "tenant_id", "collection_id"):
+        if hasattr(retriever, name):
+            value, value_complete = _authorization_snapshot(getattr(retriever, name), seen=set())
+            snapshot[name] = value
+            complete = complete and value_complete
+    for name in (
+        "base_retriever", "retriever", "fallback_retriever", "external_retriever", "child_retriever",
+    ):
+        nested = getattr(retriever, name, None)
+        if nested is not None:
+            value, value_complete = _retriever_authorization_snapshot(nested, seen=seen)
+            if value:
+                snapshot[name] = value
+            complete = complete and value_complete
+    nested_retrievers = getattr(retriever, "retrievers", ())
+    if isinstance(nested_retrievers, Mapping):
+        nested_retrievers = list(nested_retrievers.values())
+    if isinstance(nested_retrievers, SequenceABC) and not isinstance(nested_retrievers, (str, bytes)):
+        for index, nested in enumerate(nested_retrievers):
+            value, value_complete = _retriever_authorization_snapshot(nested, seen=seen)
+            if value:
+                snapshot[f"retrievers[{index}]"] = value
+            complete = complete and value_complete
+    return snapshot, complete
 
 
 def _component_fingerprint(component: Any, *, purpose: str) -> str:

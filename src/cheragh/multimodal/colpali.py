@@ -72,14 +72,28 @@ class ColPaliEngineAdapter(VisualLateInteractionEncoder):
 
     def __init__(
         self,
-        model_name: str = "vidore/colpali-v1.3",
+        model_name: str | None = None,
         *,
         model: Any | None = None,
         processor: Any | None = None,
         device: str | None = None,
         torch_dtype: Any | None = None,
         model_kwargs: dict[str, Any] | None = None,
+        processor_kwargs: dict[str, Any] | None = None,
+        model_family: str = "colpali",
+        batch_size: int = 4,
+        query_format: str = "auto",
     ):
+        _validate_batch_size(batch_size)
+        families = {
+            "colpali": ("ColPali", "ColPaliProcessor", "vidore/colpali-v1.3"),
+            "colqwen2": ("ColQwen2", "ColQwen2Processor", "vidore/colqwen2-v1.0"),
+        }
+        if model_family not in families:
+            raise ValueError("model_family must be 'colpali' or 'colqwen2'")
+        if query_format not in {"auto", "processor", "colpali-v1.3"}:
+            raise ValueError("query_format must be 'auto', 'processor' or 'colpali-v1.3'")
+        model_name = model_name or families[model_family][2]
         try:
             import torch
         except ImportError as exc:  # pragma: no cover - optional dependency
@@ -90,7 +104,7 @@ class ColPaliEngineAdapter(VisualLateInteractionEncoder):
 
         if model is None or processor is None:
             try:
-                from colpali_engine.models import ColPali, ColPaliProcessor
+                from colpali_engine import models
             except ImportError as exc:  # pragma: no cover - optional dependency
                 raise ImportError(
                     "ColPaliEngineAdapter requires colpali-engine. "
@@ -101,34 +115,69 @@ class ColPaliEngineAdapter(VisualLateInteractionEncoder):
                 load_kwargs["torch_dtype"] = torch_dtype
             if device is not None:
                 load_kwargs.setdefault("device_map", device)
-            model = model or ColPali.from_pretrained(model_name, **load_kwargs).eval()
-            processor = processor or ColPaliProcessor.from_pretrained(model_name)
+            model_class = getattr(models, families[model_family][0])
+            processor_class = getattr(models, families[model_family][1])
+            if model is None:
+                model = model_class.from_pretrained(model_name, **load_kwargs)
+            if processor is None:
+                processing_options = {
+                    key: value for key, value in load_kwargs.items()
+                    if key in {"cache_dir", "revision", "token", "local_files_only", "trust_remote_code"}
+                }
+                processing_options.update(processor_kwargs or {})
+                processor = processor_class.from_pretrained(model_name, **processing_options)
 
         self._torch = torch
         self.model_name = model_name
-        self.model = model
+        self.model = model.eval()
         self.processor = processor
         self.device = device or _model_device(model)
+        self.batch_size = batch_size
+        self.model_family = model_family
+        self.query_format = (
+            "colpali-v1.3" if query_format == "auto" and model_family == "colpali"
+            and model_name in {"vidore/colpali-v1.3", "vidore/colpali-v1.3-merged"}
+            else "processor" if query_format == "auto" else query_format
+        )
 
     def embed_pages(self, pages: Sequence[MultimodalDocument]) -> Sequence[Any]:
-        images = [_load_page_image(page) for page in pages]
-        if not images:
-            return []
-        batch = self.processor.process_images(images)
-        embeddings = self._forward(batch)
-        return _split_embeddings(embeddings)
+        results: list[Any] = []
+        for start in range(0, len(pages), self.batch_size):
+            images: list[Any] = []
+            try:
+                for page in pages[start : start + self.batch_size]:
+                    images.append(_load_page_image(page))
+                batch = self.processor.process_images(images)
+                results.extend(self._forward(batch))
+            finally:
+                for image in images:
+                    image.close()
+        return results
 
     def embed_queries(self, queries: Sequence[str]) -> Sequence[Any]:
         if not queries:
             return []
         if any(not isinstance(query, str) or not query.strip() for query in queries):
             raise ValueError("ColPali queries must be non-empty strings")
-        batch = self.processor.process_queries(list(queries))
-        embeddings = self._forward(batch)
-        return _split_embeddings(embeddings)
+        results: list[Any] = []
+        for start in range(0, len(queries), self.batch_size):
+            group = list(queries[start : start + self.batch_size])
+            if self.query_format == "colpali-v1.3":
+                tokenizer = self.processor.tokenizer
+                # Preserve the checkpoint's trained render despite processor
+                # changes in colpali-engine 0.3.11/0.3.13. Real augmentation PAD
+                # tokens remain attended; only tokenizer-added padding is removed.
+                rendered = [tokenizer.bos_token + "Query: " + query + tokenizer.pad_token * 10 + "\n" for query in group]
+                batch = tokenizer(rendered, padding="longest", return_tensors="pt", return_token_type_ids=True)
+                if "token_type_ids" not in batch:
+                    batch["token_type_ids"] = self._torch.zeros_like(batch["input_ids"])
+            else:
+                batch = self.processor.process_queries(group)
+            results.extend(self._forward(batch))
+        return results
 
     def get_fingerprint(self) -> str:
-        return f"colpali-engine::{self.model_name}"
+        return f"colpali-engine::{self.model_name}::{self.model_family}::{self.query_format}"
 
     def _forward(self, batch: Any) -> Any:
         if hasattr(batch, "to"):
@@ -138,8 +187,10 @@ class ColPaliEngineAdapter(VisualLateInteractionEncoder):
                 key: value.to(self.device) if hasattr(value, "to") else value
                 for key, value in batch.items()
             }
-        with self._torch.no_grad():
-            return self.model(**batch)
+        with self._torch.inference_mode():
+            embeddings = self.model(**batch)
+        embeddings = getattr(embeddings, "embeddings", embeddings)
+        return _split_embeddings(embeddings, attention_mask=batch.get("attention_mask"))
 
 
 class ColPaliRetriever(BaseRetriever):
@@ -148,12 +199,18 @@ class ColPaliRetriever(BaseRetriever):
     def __init__(
         self,
         pages: Iterable[MultimodalDocument],
-        encoder: VisualLateInteractionEncoder,
+        encoder: VisualLateInteractionEncoder | None = None,
         *,
         normalize_vectors: bool = True,
         normalize_by_query_tokens: bool = False,
+        batch_size: int = 8,
+        score_batch_size: int = 16,
     ):
-        self.encoder = encoder
+        _validate_batch_size(batch_size)
+        _validate_batch_size(score_batch_size)
+        self.encoder = encoder if encoder is not None else ColPaliEngineAdapter()
+        self.batch_size = batch_size
+        self.score_batch_size = score_batch_size
         self.normalize_vectors = bool(normalize_vectors)
         self.normalize_by_query_tokens = bool(normalize_by_query_tokens)
         self.pages: list[MultimodalDocument] = []
@@ -166,7 +223,13 @@ class ColPaliRetriever(BaseRetriever):
         if not snapshots:
             return
         encoder_pages = [_snapshot_page(page) for page in snapshots]
-        raw_embeddings = list(self.encoder.embed_pages(encoder_pages))
+        raw_embeddings: list[Any] = []
+        for start in range(0, len(encoder_pages), self.batch_size):
+            batch = encoder_pages[start : start + self.batch_size]
+            encoded = list(self.encoder.embed_pages(batch))
+            if len(encoded) != len(batch):
+                raise ValueError("Visual encoder must return one embedding matrix per page")
+            raw_embeddings.extend(encoded)
         if len(raw_embeddings) != len(snapshots):
             raise ValueError("Visual encoder must return one embedding matrix per page")
         expected_dimension = self.dimension
@@ -209,16 +272,25 @@ class ColPaliRetriever(BaseRetriever):
         )
 
         ranked: list[tuple[float, int, Any, Any]] = []
-        for index, (page, page_matrix) in enumerate(zip(self.pages, self.page_embeddings)):
-            if not metadata_matches(page.metadata, filters):
-                continue
-            similarities = query_matrix @ page_matrix.T
-            patch_indices = np.argmax(similarities, axis=1)
-            token_scores = np.max(similarities, axis=1)
-            score = float(np.sum(token_scores))
-            if self.normalize_by_query_tokens:
-                score /= max(1, query_matrix.shape[0])
-            ranked.append((score, index, patch_indices, token_scores))
+        candidates = [index for index, page in enumerate(self.pages) if metadata_matches(page.metadata, filters)]
+        for start in range(0, len(candidates), self.score_batch_size):
+            indices = candidates[start : start + self.score_batch_size]
+            width = max(len(self.page_embeddings[index]) for index in indices)
+            padded = np.zeros((len(indices), width, query_matrix.shape[1]), dtype=query_matrix.dtype)
+            valid = np.zeros((len(indices), width), dtype=bool)
+            for offset, index in enumerate(indices):
+                rows = self.page_embeddings[index]
+                padded[offset, :len(rows)] = rows
+                valid[offset, :len(rows)] = True
+            similarities = np.einsum("qd,bpd->bqp", query_matrix, padded)
+            similarities = np.where(valid[:, None, :], similarities, -np.inf)
+            for offset, index in enumerate(indices):
+                patch_indices = np.argmax(similarities[offset], axis=1)
+                token_scores = np.max(similarities[offset], axis=1)
+                score = float(np.sum(token_scores))
+                if self.normalize_by_query_tokens:
+                    score /= max(1, query_matrix.shape[0])
+                ranked.append((score, index, patch_indices, token_scores))
         ranked.sort(key=lambda item: (-item[0], self.pages[item[1]].doc_id or "", item[1]))
 
         results: list[MultimodalDocument] = []
@@ -232,6 +304,7 @@ class ColPaliRetriever(BaseRetriever):
                 "retrieval_method": "colpali-maxsim",
                 "maxsim_patch_indices": [int(value) for value in patch_indices.tolist()],
                 "maxsim_token_scores": [float(value) for value in token_scores.tolist()],
+                "maxsim_index_space": "page_embedding_rows",
                 "visual_encoder": self.encoder.get_fingerprint(),
             }
             results.append(
@@ -294,15 +367,29 @@ def _to_numpy(value: Any) -> Any:
         value = value.detach()
     if hasattr(value, "cpu"):
         value = value.cpu()
+    if str(getattr(value, "dtype", "")) == "torch.bfloat16":
+        value = value.float()
     if hasattr(value, "numpy"):
         value = value.numpy()
     return value
 
 
-def _split_embeddings(value: Any) -> list[Any]:
-    if hasattr(value, "unbind"):
-        return list(value.unbind(0))
-    return list(value)
+def _split_embeddings(value: Any, *, attention_mask: Any | None = None) -> list[Any]:
+    np = _numpy()
+    array = np.asarray(_to_numpy(value))
+    if array.ndim != 3:
+        raise ValueError("ColPali model must return (batch, tokens, dimension) embeddings")
+    mask = np.asarray(_to_numpy(attention_mask)) if attention_mask is not None else np.ones(array.shape[:2], dtype=bool)
+    if mask.shape != array.shape[:2]:
+        raise ValueError("ColPali attention mask does not match embedding shape")
+    # The model zeros masked positions, but leaving zero rows in MaxSim can
+    # incorrectly beat negative real similarities and make scores batch-dependent.
+    return [row[mask[index].astype(bool)].copy() for index, row in enumerate(array)]
+
+
+def _validate_batch_size(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("batch sizes must be positive integers")
 
 
 def _model_device(model: Any) -> str:

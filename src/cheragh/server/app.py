@@ -547,7 +547,18 @@ def create_app(
             raise HTTPException(status_code=500, detail="Indexing failed")
 
     @app.get("/stats", dependencies=[AuthDependency])
-    def stats() -> dict[str, Any]:
+    async def stats() -> dict[str, Any]:
+        # Cache backends may need disk or network I/O even for statistics.
+        # Account for this work exactly like generation so stalled monitoring
+        # requests cannot exhaust the worker pool or bypass operation limits.
+        try:
+            return await operation_limiter.run(collect_stats, timeout_seconds=request_timeout_seconds)
+        except _ServerBusyError as exc:
+            raise HTTPException(status_code=503, detail="Server is busy", headers={"Retry-After": "1"}) from exc
+        except _OperationTimeoutError as exc:
+            raise HTTPException(status_code=504, detail="Request timed out") from exc
+
+    def collect_stats() -> dict[str, Any]:
         retriever = getattr(engine, "retriever", None)
         store = getattr(retriever, "store", None)
         docs = getattr(store, "documents", None)

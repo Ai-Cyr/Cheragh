@@ -229,7 +229,7 @@ class ArchitectureCoverageTests(unittest.TestCase):
 
     def test_contextual_compression_filters_and_preserves_source_metadata(self) -> None:
         relevant = Document(
-            "Long relevant source text.",
+            "Long relevant source text. Relevant extracted sentence.",
             doc_id="relevant",
             metadata={"nested": {"owner": "base"}},
         )
@@ -490,7 +490,7 @@ class ArchitectureCoverageTests(unittest.TestCase):
         )
         llm = _QueueLLM(["1. alpha question?\n2. beta question?"])
         retriever = QueryDecompositionRetriever(
-            base, llm, max_subquestions=2, per_subquestion_top_k=2
+            base, llm, max_subquestions=2, per_subquestion_top_k=2, fusion="max_score"
         )
 
         result = retriever.retrieve("complex question", top_k=2)

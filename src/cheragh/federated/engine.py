@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 import inspect
 from typing import Any, Mapping
 
@@ -41,7 +42,14 @@ class FederatedRetriever(BaseRetriever):
         sources: Mapping[str, Any],
         top_k_per_source: int = 5,
         continue_on_error: bool = True,
+        *,
+        fusion: str = "rrf",
+        rrf_k: int = 60,
     ):
+        if fusion not in {"rrf", "score"}:
+            raise ValueError("fusion must be 'rrf' or 'score'")
+        self.fusion = fusion
+        self.rrf_k = _validate_top_k(rrf_k, name="rrf_k")
         self.sources = dict(sources)
         self.top_k_per_source = _validate_top_k(top_k_per_source, name="top_k_per_source")
         self.continue_on_error = continue_on_error
@@ -53,7 +61,7 @@ class FederatedRetriever(BaseRetriever):
         merged: dict[str, Document] = {}
         for source_name, source in self.sources.items():
             try:
-                result = _query_source(source_name, source, query, self.top_k_per_source)
+                result = deepcopy(_query_source(source_name, source, query, self.top_k_per_source))
             except Exception as exc:  # pragma: no cover - defensive branch
                 if not self.continue_on_error:
                     raise
@@ -64,16 +72,19 @@ class FederatedRetriever(BaseRetriever):
                 original_doc_id = doc.doc_id
                 local_doc_id = str(original_doc_id) if original_doc_id is not None else f"document-{rank + 1}"
                 qualified_doc_id = f"{source_name}::{local_doc_id}"
-                score = doc.score if doc.score is not None else 1.0 / (rank + 1)
+                score = (1.0 / (self.rrf_k + rank + 1) if self.fusion == "rrf" else
+                         doc.score if doc.score is not None else 1.0 / (rank + 1))
                 metadata = {
-                    **dict(doc.metadata or {}),
+                    **deepcopy(doc.metadata or {}),
                     "original_doc_id": original_doc_id,
                     "source_name": source_name,
                     "federated_rank": rank + 1,
+                    "federated_original_score": doc.score,
+                    "federated_fusion": self.fusion,
                 }
                 qualified = Document(doc.content, metadata=metadata, doc_id=qualified_doc_id, score=score)
                 qualified_documents.append(qualified)
-                merged[qualified_doc_id] = qualified
+                merged.setdefault(qualified_doc_id, qualified)
             result.documents = qualified_documents
             if result.answer and not result.documents:
                 doc_id = f"{source_name}::answer"
@@ -85,7 +96,7 @@ class FederatedRetriever(BaseRetriever):
                         "original_doc_id": "answer",
                     },
                     doc_id=doc_id,
-                    score=0.5,
+                    score=1.0 / (self.rrf_k + 1) if self.fusion == "rrf" else 0.5,
                 )
         ordered = sorted(merged.values(), key=lambda doc: (doc.score is not None, doc.score or 0.0), reverse=True)
         return ordered[:top_k]

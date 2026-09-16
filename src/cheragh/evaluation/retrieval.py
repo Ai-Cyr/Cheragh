@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import math
 from typing import Iterable, Mapping, Sequence
 
-from ..base import BaseRetriever, Document
+from ..base import BaseRetriever, Document, _validate_top_k
 
 
 @dataclass
@@ -46,6 +46,7 @@ def evaluate_retrieval(
     - ``ndcg@k``: normalized discounted cumulative gain, binary or graded.
     - ``context_precision@k``: average precision over the retrieved context list.
     """
+    top_k = _validate_top_k(top_k)
     rows: list[dict] = []
     hit_count = 0
     reciprocal_ranks: list[float] = []
@@ -56,7 +57,7 @@ def evaluate_retrieval(
 
     parsed = [_parse_example(example) for example in examples]
     for example in parsed:
-        docs = retriever.retrieve(example.query, top_k=top_k)
+        docs = retriever.retrieve(example.query, top_k=top_k)[:top_k]
         retrieved_ids = [doc.doc_id for doc in docs if doc.doc_id is not None]
         expected = set(example.expected_doc_ids)
         relevance_scores = [_relevance(doc, example) for doc in docs]
@@ -76,7 +77,7 @@ def evaluate_retrieval(
         ndcg = _ndcg(credited_scores, example, top_k=top_k)
         context_precision = _average_precision(
             credited_hits,
-            relevant_total=min(len(expected), top_k) if expected else sum(credited_hits),
+            relevant_total=sum(credited_hits),
         )
 
         reciprocal_ranks.append(rr)
@@ -114,23 +115,31 @@ def evaluate_retrieval(
 
 
 def recall_at_k(retrieved_ids: Sequence[str], expected_ids: set[str], k: int) -> float:
+    k = _validate_top_k(k, name="k")
     if not expected_ids:
         return 1.0
     return len(set(retrieved_ids[:k]) & expected_ids) / len(expected_ids)
 
 
 def ndcg_at_k(relevance_scores: Sequence[float], ideal_scores: Sequence[float] | None = None, k: int = 5) -> float:
+    k = _validate_top_k(k, name="k")
     scores = list(relevance_scores[:k])
+    if any(not math.isfinite(score) or score < 0 for score in scores):
+        raise ValueError("nDCG gains must be finite and non-negative")
     if ideal_scores is None:
         ideal_scores = sorted(scores, reverse=True)
     else:
         ideal_scores = sorted(list(ideal_scores), reverse=True)[:k]
+    if any(not math.isfinite(score) or score < 0 for score in ideal_scores):
+        raise ValueError("nDCG ideal gains must be finite and non-negative")
     dcg = _dcg(scores)
     idcg = _dcg(ideal_scores)
     return dcg / idcg if idcg > 0 else 0.0
 
 
 def context_precision_at_k(relevance_flags: Sequence[bool], k: int | None = None) -> float:
+    if k is not None:
+        k = _validate_top_k(k, name="k")
     flags = list(relevance_flags[:k]) if k is not None else list(relevance_flags)
     return _average_precision(flags, relevant_total=sum(flags))
 
@@ -138,7 +147,13 @@ def context_precision_at_k(relevance_flags: Sequence[bool], k: int | None = None
 def _parse_example(example: RetrievalExample | dict) -> RetrievalExample:
     if isinstance(example, RetrievalExample):
         if example.graded_relevance:
-            return example
+            graded = dict(example.graded_relevance)
+            if any(not math.isfinite(score) or score < 0 for score in graded.values()):
+                raise ValueError("Graded relevance must be finite and non-negative")
+            expected = set(example.expected_doc_ids) | {key for key, score in graded.items() if score > 0}
+            for doc_id in expected:
+                graded.setdefault(doc_id, 1.0)
+            return RetrievalExample(example.query, expected, graded)
         # Copy instead of mutating the caller-owned example in place.
         return RetrievalExample(
             query=example.query,
@@ -154,6 +169,9 @@ def _parse_example(example: RetrievalExample | dict) -> RetrievalExample:
     else:
         graded_relevance = {}
     expected_set = set(str(doc_id) for doc_id in expected)
+    if any(not math.isfinite(score) or score < 0 for score in graded_relevance.values()):
+        raise ValueError("Graded relevance must be finite and non-negative")
+    expected_set.update(key for key, score in graded_relevance.items() if score > 0)
     for doc_id in expected_set:
         graded_relevance.setdefault(doc_id, 1.0)
     query = example.get("query")

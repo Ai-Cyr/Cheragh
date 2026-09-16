@@ -1,0 +1,7 @@
+include CHANGELOG.md SECURITY.md Dockerfile docker-compose.yml .dockerignore
+recursive-include .github *.yml
+recursive-include docker *.txt
+recursive-include docs *.md
+recursive-include src/cheragh *.md
+recursive-include examples *.py *.yaml *.jsonl *.md
+recursive-include scripts *.py

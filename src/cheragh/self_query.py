@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .base import BaseRetriever, Document, EmbeddingModel, LLMClient, _validate_top_k, cosine_similarity
+from .base import BaseRetriever, Document, EmbeddingModel, LLMClient, _snapshot_documents, _validate_top_k, cosine_similarity
 from .cache import hash_documents, embedder_fingerprint, load_cache, save_cache
+from .filters import metadata_matches
 
 
 SELF_QUERY_PROMPT_FR = """Tu es un assistant qui transforme une question en langage naturel en une recherche structurée.
@@ -43,10 +45,10 @@ class SelfQueryRetriever(BaseRetriever):
         cache_path: Optional[str] = None,
         allow_unsafe_pickle: bool = False,
     ):
-        self.documents = documents
+        self.documents = _snapshot_documents(documents)
         self.embedding_model = embedding_model
         self.llm_client = llm_client
-        self.metadata_schema = metadata_schema
+        self.metadata_schema = dict(metadata_schema)
         self._cache_path = cache_path
         self._allow_unsafe_pickle = allow_unsafe_pickle
 
@@ -65,10 +67,12 @@ class SelfQueryRetriever(BaseRetriever):
         if not mask.any():
             return []
 
+        if self.doc_embeddings is None:
+            raise ValueError("Self-query document embeddings are unavailable")
         query_vec = self.embedding_model.embed_query(cleaned_query or query)
         scores = cosine_similarity(query_vec, self.doc_embeddings)
         scores = np.where(mask, scores, -np.inf)
-        top_idx = np.argsort(scores)[::-1][:top_k]
+        top_idx = np.argsort(-scores, kind="stable")[:top_k]
 
         results: List[Document] = []
         for i in top_idx:
@@ -78,7 +82,7 @@ class SelfQueryRetriever(BaseRetriever):
             results.append(
                 Document(
                     content=doc.content,
-                    metadata={**doc.metadata, "applied_filters": filters, "cleaned_query": cleaned_query},
+                    metadata={**deepcopy(doc.metadata), "applied_filters": deepcopy(filters), "cleaned_query": cleaned_query},
                     doc_id=doc.doc_id,
                     score=float(scores[i]),
                 )
@@ -126,32 +130,40 @@ class SelfQueryRetriever(BaseRetriever):
         raw = self.llm_client.generate(prompt)
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not match:
-            return query, {}
+            raise ValueError("Self-query generator must return a structured JSON object")
         try:
-            parsed = json.loads(match.group(0))
-            return parsed.get("cleaned_query", query), parsed.get("filters", {}) or {}
-        except json.JSONDecodeError:
-            return query, {}
+            parsed = json.loads(match.group(0), object_pairs_hook=_unique_json_fields, parse_constant=_invalid_json_constant)
+        except ValueError as exc:
+            raise ValueError("Self-query generator returned invalid JSON") from exc
+        if not isinstance(parsed, dict) or set(parsed) != {"cleaned_query", "filters"}:
+            raise ValueError("Self-query requires exactly cleaned_query and filters fields")
+        cleaned = parsed["cleaned_query"]
+        filters = parsed["filters"]
+        if not isinstance(cleaned, str) or not isinstance(filters, dict):
+            raise ValueError("Self-query requires a string cleaned_query and object filters")
+        for field, condition in filters.items():
+            if field not in self.metadata_schema:
+                raise ValueError(f"Self-query generated an undeclared metadata field: {field}")
+            if isinstance(condition, dict):
+                if not condition or set(condition) - {"$eq", "$ne", "$in", "$gte", "$lte", "$gt", "$lt"}:
+                    raise ValueError("Self-query generated an unsupported comparison operator")
+                if "$in" in condition and not isinstance(condition["$in"], list):
+                    raise ValueError("Self-query $in comparison requires a JSON array")
+        return cleaned, filters
 
     @staticmethod
     def _match_filters(metadata: Dict[str, Any], filters: Dict[str, Any]) -> bool:
-        for field, condition in filters.items():
-            value = metadata.get(field)
-            if isinstance(condition, dict):
-                for op, op_val in condition.items():
-                    if op == "$gte" and not (value is not None and value >= op_val):
-                        return False
-                    elif op == "$lte" and not (value is not None and value <= op_val):
-                        return False
-                    elif op == "$gt" and not (value is not None and value > op_val):
-                        return False
-                    elif op == "$lt" and not (value is not None and value < op_val):
-                        return False
-                    elif op == "$ne" and value == op_val:
-                        return False
-                    elif op == "$in" and value not in op_val:
-                        return False
-            else:
-                if value != condition:
-                    return False
-        return True
+        return metadata_matches(metadata, filters)
+
+
+def _unique_json_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate structured-query JSON key")
+        result[key] = value
+    return result
+
+
+def _invalid_json_constant(value):
+    raise ValueError(f"invalid structured-query JSON constant: {value}")

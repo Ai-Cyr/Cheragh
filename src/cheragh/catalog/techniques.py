@@ -84,7 +84,8 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         TechniqueStatus.EXPERIMENTAL,
         "cheragh.PropositionalRetriever",
         "Index generated atomic propositions while returning source context.",
-        limitations=("Proposition quality depends on the injected generator; the fallback is rule based.",),
+        references=("https://arxiv.org/abs/2312.06648",),
+        limitations=("Use TransformersPropositionizer for the trained Dense X extractor or supply an LLM; validate atomicity on the target corpus.",),
     ),
     _spec("bm25", "BM25", TechniqueFamily.RETRIEVAL, TechniqueStatus.STABLE, "cheragh.BM25Retriever", "Standalone sparse lexical first-stage retrieval without an embedding model."),
     _spec("dense", "Dense retrieval", TechniqueFamily.RETRIEVAL, TechniqueStatus.STABLE, "cheragh.MemoryVectorStore", "Single-vector semantic retrieval with pluggable embeddings."),
@@ -110,10 +111,10 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "cheragh.retrieval.ColBERTRetriever",
         "Token-level MaxSim late interaction with injectable encoders.",
         references=("https://arxiv.org/abs/2004.12832",),
-        limitations=("Exact in-memory MaxSim; no compressed ANN index is bundled and the default encoder is not a trained ColBERT model.",),
+        limitations=("The default ColBERTv2 checkpoint includes its trained projection and tokenizer conventions; exact in-memory MaxSim has no compressed ANN index.",),
     ),
     _spec("hyde", "HyDE", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.HyDERetriever", "Retrieve from an LLM-generated hypothetical answer.", references=("https://arxiv.org/abs/2212.10496",)),
-    _spec("hyqe", "HyQE", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.HyQERetriever", "Index hypothetical questions associated with source documents."),
+    _spec("hyqe", "HyQE", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.HyQEReranker", "Rank candidates by additive context and hypothetical-question similarities (Eq. 2/5).", references=("https://arxiv.org/abs/2410.15262",)),
     _spec("rag-fusion", "RAG-Fusion", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.RAGFusionRetriever", "Generate multiple queries and fuse their result ranks."),
     _spec(
         "self-query",
@@ -124,7 +125,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "Generate a semantic query plus metadata filters.",
         limitations=("The bundled parser supports a bounded metadata-filter grammar; custom parsers remain injectable.",),
     ),
-    _spec("step-back", "Step-back prompting", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.StepBackRetriever", "Retrieve using a more abstract companion query."),
+    _spec("step-back", "Step-back prompting", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.StepBackRAGEngine", "Abstract the question, derive principles, then synthesize from specific and general evidence.", references=("https://arxiv.org/abs/2310.06117",)),
     _spec("query-decomposition", "Query decomposition", TechniqueFamily.QUERY, TechniqueStatus.EXPERIMENTAL, "cheragh.QueryDecompositionRetriever", "Split complex questions into retrievable sub-questions."),
     _spec("context-compression", "Contextual compression", TechniqueFamily.AUGMENTATION, TechniqueStatus.BETA, "cheragh.ContextualCompressionRetriever", "Retrieve, then remove irrelevant and redundant text through an injectable compression pipeline."),
     _spec(
@@ -136,10 +137,10 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "Pack scored evidence under a strict token budget with source quotas and boundary-aware ordering.",
         references=("https://arxiv.org/abs/2406.15319",),
         limitations=(
-            "Context packing only; LongRAG's grouped long units and long-reader workflow are separate. Exact limits require the target tokenizer.",
+            "LongRAGRetriever and LongRAGEngine additionally implement document grouping, max-chunk dot scoring and a one/two-stage long reader. Exact limits require the target tokenizer.",
         ),
     ),
-    _spec("chain-of-note", "Chain-of-Note", TechniqueFamily.AUGMENTATION, TechniqueStatus.EXPERIMENTAL, "cheragh.ChainOfNoteRetriever", "Generate evidence notes before final synthesis."),
+    _spec("chain-of-note", "Chain-of-Note", TechniqueFamily.AUGMENTATION, TechniqueStatus.EXPERIMENTAL, "cheragh.ChainOfNoteRAGEngine", "Read sequential direct/contextual/unknown notes and synthesize using verified source quotes.", references=("https://arxiv.org/abs/2311.09210",), limitations=("Prompted inference; no paper-trained Chain-of-Note checkpoint is bundled.",)),
     _spec(
         "crag",
         "Corrective RAG",
@@ -149,7 +150,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "Grade evidence into correct/ambiguous/incorrect actions, refine it and optionally retrieve externally.",
         references=("https://arxiv.org/abs/2401.15884",),
         limitations=(
-            "External/web search and semantic graders are injectable; the bundled decompose/recompose refiner is lexical.",
+            "Use CrossEncoderRetrievalGrader with held-out calibration and SemanticKnowledgeRefiner; the legacy defaults remain lexical. External search is application-provided.",
         ),
     ),
     _spec(
@@ -157,10 +158,10 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "Inference-time Self-RAG",
         TechniqueFamily.ORCHESTRATION,
         TechniqueStatus.EXPERIMENTAL,
-        "cheragh.self_rag.SelfRAGEngine",
-        "Gate retrieval, critique evidence and refine a grounded answer at inference time.",
+        "cheragh.SegmentedSelfRAGEngine",
+        "Generate passage-conditioned segments with reflection logits, Retrieve/No/Continue decisions and bounded beam search.",
         references=("https://openreview.net/forum?id=hSyW5go0v8",),
-        limitations=("Modular inference approximation; it does not train reflection-token models.",),
+        limitations=("TransformersSelfRAGDecoder requires a trained reflection-token checkpoint. Critic/generator training and published benchmarks are not reproduced.",),
     ),
     _spec(
         "flare",
@@ -183,7 +184,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "Route query complexity across no retrieval, single-step RAG and iterative RAG engines.",
         references=("https://arxiv.org/abs/2403.14403",),
         limitations=(
-            "Classifier and iterative engine are injectable; the bundled heuristic is deterministic rather than learned.",
+            "AdaptiveSilverDatasetBuilder collects actual strategy outcomes; TransformersComplexityClassifier trains T5/BERT routes. Deploy a validated classifier instead of the legacy heuristic.",
         ),
     ),
     _spec("parent-child", "Parent-child retrieval", TechniqueFamily.ORCHESTRATION, TechniqueStatus.BETA, "cheragh.ParentChildRetriever", "Search fine chunks and return larger parent context."),
@@ -241,7 +242,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         TechniqueFamily.ORCHESTRATION,
         TechniqueStatus.BETA,
         "cheragh.ConversationalRAGEngine",
-        "Retrieve with a bounded query-context window.",
+        "Rewrite follow-up questions through an optional LLM using a bounded history window.",
         limitations=("The in-memory store keeps all turns; applications must provide retention for long-lived sessions.",),
     ),
     _spec("sql-rag", "SQL RAG", TechniqueFamily.STRUCTURED, TechniqueStatus.BETA, "cheragh.SQLRAGEngine", "Generate and execute guarded read-only SQLite queries."),
@@ -269,7 +270,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
             "https://arxiv.org/abs/2408.08067",
         ),
         limitations=(
-            "The dependency-free lexical fallback cannot detect semantic paraphrases or contradictions; inject an NLI/LLM judge.",
+            "Concrete NLIFaithfulnessJudge, LLMFaithfulnessJudge and LLMClaimSegmenter are available; the default lexical fallback is only a diagnostic. Calibrate against human labels.",
         ),
     ),
     _spec("access-controlled-rag", "Access-controlled RAG", TechniqueFamily.GOVERNANCE, TechniqueStatus.BETA, "cheragh.AccessControlledRAGEngine", "Filter retrieved evidence using tenant, collection, role and classification policy."),
@@ -281,7 +282,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "cheragh.CommunityGraphRAGEngine",
         "Detect communities, build reports and support global or local graph-grounded search.",
         references=("https://arxiv.org/abs/2404.16130",),
-        limitations=("Optional hierarchical Leiden and bounded global map-reduce; graph extraction, report quality and benchmark validation remain application responsibilities.",),
+        limitations=("LLMGraphExtractor, entity embeddings, hierarchical Leiden, local context and global map-reduce are available. Qualify extraction/report quality and benchmark performance.",),
     ),
     _spec(
         "colpali",
@@ -301,7 +302,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         "cheragh.TemporalRetriever",
         "Filter by validity windows, weight freshness and resolve document versions at retrieval time.",
         references=("https://aclanthology.org/2024.emnlp-main.394/",),
-        limitations=("Requires reliable temporal metadata and comparable base scores; no temporal graph or query-time parser is bundled.",),
+        limitations=("TimeR4Retriever additionally implements FKS/TKS retrieval, grounded rewriting and temporal reranking. Reliable facts and a trained temporal encoder remain required.",),
     ),
     _spec(
         "retrieval-training",
@@ -309,13 +310,13 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         TechniqueFamily.EVALUATION,
         TechniqueStatus.EXPERIMENTAL,
         "cheragh.RetrievalTrainingPipeline",
-        "Prepare hard negatives, distillation labels and RAFT-style records behind an injectable trainer boundary.",
+        "Mine/distil retrieval examples, train encoders, and perform causal/seq2seq RAFT or joint RankRAG supervision.",
         references=(
             "https://arxiv.org/abs/2104.08051",
             "https://arxiv.org/abs/2403.10131",
             "https://arxiv.org/abs/2407.02485",
         ),
-        limitations=("Grounded RAFT data and optional Torch contrastive/KL training; callers supply encoders and optimizers. No pretrained weights, LLM SFT runner or distributed training.",),
+        limitations=("TorchRetrievalTrainer and TransformersGenerativeTrainer perform real optimization; RankRAGModel ranks and answers with shared weights. Supply domain data/checkpoints; distributed training is not implemented.",),
     ),
 )
 

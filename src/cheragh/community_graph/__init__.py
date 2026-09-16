@@ -15,7 +15,14 @@ from .paper import (
     global_map_reduce,
 )
 
+from .extraction import GraphEntity, LLMGraphExtractor, SemanticKnowledgeGraph
+from .local import LocalGraphSearchConfig
+
 __all__ = [
+    "GraphEntity",
+    "LLMGraphExtractor",
+    "SemanticKnowledgeGraph",
+    "LocalGraphSearchConfig",
     "Community",
     "CommunityGraphRAGEngine",
     "CommunityReport",

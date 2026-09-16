@@ -45,7 +45,12 @@ class CrossEncoderReranker(BaseReranker):
         if not documents:
             return []
         pairs = [(query, doc.content) for doc in documents]
-        scores = self.model.predict(pairs)
+        import numpy as np
+        scores = np.asarray(self.model.predict(pairs), dtype=float)
+        if scores.shape == (len(documents), 1):
+            scores = scores[:, 0]
+        if scores.shape != (len(documents),) or not np.isfinite(scores).all():
+            raise ValueError("Cross-encoder must return one finite relevance score per candidate")
         scored = sorted(zip(documents, scores), key=lambda item: float(item[1]), reverse=True)
         return [_copy_with_rerank_score(doc, float(score)) for doc, score in scored[:top_k]]
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 import re
 from typing import Iterable
 
@@ -31,12 +32,12 @@ class MarkdownHeaderChunker:
             for section_index, section in enumerate(sections):
                 section_doc = Document(
                     content=section["content"],
-                    metadata={**doc.metadata, "section": section["title"], "heading_level": section["level"]},
+                    metadata={**deepcopy(doc.metadata), "section": section["title"], "heading_level": section["level"]},
                     doc_id=f"{base_id}#section-{section_index}",
                 )
                 if len(section_doc.content) > self.chunk_size:
                     output.extend(fallback.split_documents([section_doc]))
-                elif len(section_doc.content.strip()) >= self.min_chunk_size:
+                elif section_doc.content.strip():
                     section_doc.metadata["chunk_index"] = 0
                     section_doc.metadata["parent_doc_id"] = base_id
                     output.append(section_doc)
@@ -84,12 +85,12 @@ class HTMLSectionChunker:
             for idx, section in enumerate(sections):
                 section_doc = Document(
                     content=section["content"],
-                    metadata={**doc.metadata, "section": section["title"], "heading_level": section["level"]},
+                    metadata={**deepcopy(doc.metadata), "section": section["title"], "heading_level": section["level"]},
                     doc_id=f"{base_id}#section-{idx}",
                 )
                 if len(section_doc.content) > self.chunk_size:
                     output.extend(fallback.split_documents([section_doc]))
-                elif len(section_doc.content.strip()) >= self.min_chunk_size:
+                elif section_doc.content.strip():
                     section_doc.metadata["chunk_index"] = 0
                     section_doc.metadata["parent_doc_id"] = base_id
                     output.append(section_doc)
@@ -102,6 +103,9 @@ class HTMLSectionChunker:
             text = html_to_text(raw_html)
             return [{"title": "document", "level": 0, "content": text}] if text else []
         sections: list[dict[str, str | int]] = []
+        preamble = html_to_text(raw_html[:matches[0].start()]).strip()
+        if preamble:
+            sections.append({"title": "document", "level": 0, "content": preamble})
         for index, match in enumerate(matches):
             start = match.start()
             end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_html)
@@ -150,5 +154,18 @@ class SentenceWindowChunker:
 
 
 def _split_sentences(text: str) -> list[str]:
-    normalized = re.sub(r"\s+", " ", text).strip()
-    return [sentence.strip() for sentence in re.split(r"(?<=[.!?。！？])\s+", normalized) if sentence.strip()]
+    return [text[start:end] for start, end in _sentence_spans(text)]
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans for the dependency-free sentence boundary baseline."""
+    boundaries = [0, *(match.end() for match in re.finditer(r"(?<=[.!?。！？])\s+", text)), len(text)]
+    spans = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start < end:
+            spans.append((start, end))
+    return spans

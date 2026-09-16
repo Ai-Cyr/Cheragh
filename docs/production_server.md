@@ -33,9 +33,9 @@ default. Programmatic deployments must explicitly set
 | Control | Default | Behaviour |
 | --- | ---: | --- |
 | `max_request_body_bytes` | 1 MiB | Rejects declared and streamed oversize bodies with `413`. |
-| `max_concurrent_operations` | 16 | Shared bound for ask, stream and index work; saturation returns `503`. |
+| `max_concurrent_operations` | 16 | Shared bound for ask, stream, index and stats work; saturation returns `503`. |
 | `max_server_connections` | 128 | Uvicorn ceiling; must exceed the operation bound so health probes retain headroom. |
-| `request_timeout_seconds` | 60 s | Returns `504` when a synchronous ask exceeds the deadline. |
+| `request_timeout_seconds` | 60 s | Returns `504` when a synchronous ask or stats call exceeds the deadline. |
 | `index_timeout_seconds` | 900 s | Returns `504` when indexing exceeds the deadline. |
 | `stream_max_duration_seconds` | 300 s | Stops a stream between chunks after its deadline. |
 | `max_top_k` | 50 | Rejects larger retrieval requests with `422`. |
@@ -48,6 +48,8 @@ is an explicit override and must not be used on a public interface.
 A timed-out synchronous operation cannot be forcefully killed safely. It keeps
 occupying its concurrency permit until the worker really exits, preventing a
 series of timeouts from creating an unbounded hidden worker backlog.
+This also applies to `/stats`: a slow store cannot block the event loop, and its
+capacity permit remains reserved until the worker finishes.
 
 Every HTTP response has `X-Request-ID`, `Cache-Control: no-store`, and
 `X-Content-Type-Options: nosniff`. A caller-supplied request ID is retained only
@@ -72,6 +74,8 @@ The root must be an existing directory. Both input and output paths are
 resolved beneath it, including symlink resolution. Invalid paths and internal
 indexing exceptions are redacted from HTTP responses. Prefer a separate,
 non-public indexing deployment when runtime ingestion is not essential.
+The explicit CLI option `--no-enable-indexing` disables this endpoint even when
+`CHERAGH_ENABLE_INDEXING=true` is present in the inherited environment.
 
 ## Infrastructure still required
 

@@ -399,17 +399,21 @@ def index_path(
         kept_embeddings = None
         if (
             options.incremental
+            and previous.files
             and not embedding_changed
             and not indexing_options_changed
             and not store_snapshot_changed
             and store_files_available
         ):
             existing = MemoryVectorStore.load(output_path, embedder)
-            dirty_sources = set(plan.changed_files) | set(plan.deleted_files)
+            # Reuse only sources whose provenance is explicitly tracked by the
+            # previous manifest. An absent/empty manifest or stray documents
+            # must never import an unrelated corpus into this source tree.
+            unchanged_sources = set(plan.unchanged_files)
             kept_indices = [
                 index
                 for index, doc in enumerate(existing.documents)
-                if _resolved_source(doc) not in dirty_sources
+                if _resolved_source(doc) in unchanged_sources
             ]
             kept_docs = [existing.documents[index] for index in kept_indices]
             if existing.embeddings is not None and kept_indices:

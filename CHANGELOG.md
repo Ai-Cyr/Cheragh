@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Correct HyQE additive candidate scoring, HyDE document-space averaging, true cosine, BM25 consistency and rank-based query/federated fusion.
+- Add trained SPLADE and ColBERTv2 encoders with checkpoint-specific tokenization/projection; correct ColPali processing and MaxSim masks.
+- Add passage-conditioned segmented Self-RAG with a Transformers logits decoder and bounded beam search.
+- Add actual strategy-labelled Adaptive-RAG training, causal/seq2seq RAFT SFT and joint RankRAG ranking/answer generation.
+- Add LongRAG grouping/retrieval/reader, full Step-Back and sequential Chain-of-Note inference paths.
+- Add semantic GraphRAG extraction/local search, calibrated CRAG grading/refinement, concrete NLI/LLM claim evaluation and TimeR4 dual retrieval/temporal supervision.
+- Preserve chunk coverage and source offsets, validate extracted evidence, retain parent ACLs and authorize all source dependencies of derived summaries.
+- Add real tiny-model learning tests, opt-in published-checkpoint checks, CPU research CI and an updated 44-technique fidelity audit.
+
+- Make Python async streaming non-blocking, preserve provider context and close cancelled streams even when the executor is saturated.
+- Intersect multi-tenant retrieval with the selected tenant and collection, including admin users, while preserving custom ACL policies and progressively searching past denied results.
+- Isolate cached authorized retrieval by principal, policy and selected collection, including changes in permissions.
+- Make the default extractive client answer from retrieved evidence instead of echoing system instructions and placeholder citations.
+- Remove cache-key type/separator collisions, preserve reserved-key JSON metadata and prevent SQLite quarantine from deleting a concurrent replacement.
+- Validate and copy cached embeddings before publication; keep vector-store documents and embeddings aligned on allocation failure.
+- Rebuild untracked local indexes without retaining unrelated documents from a previous corpus.
+- Apply HTTP capacity and timeout limits to stats, validate listener settings before loading providers and honor explicit indexing overrides.
+- Exercise installed wheel/sdist through indexing and generation, retain validated CI artifacts with hashes, and audit the deployed server dependency profile.
+
 - Add optional RAPTOR global/local UMAP–GMM soft clustering, bounded summary inputs and cosine-based `paper_tree` traversal.
 - Add hierarchical Leiden community detection and budgeted GraphRAG global map-reduce with source authorization and citation checks.
 - Connect FLARE to aligned generation-time token log probabilities and mask uncertain tokens from retrieval queries.

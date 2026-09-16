@@ -1,6 +1,6 @@
 # Utiliser les mécanismes issus des publications
 
-Les modes ci-dessous complètent les baselines existantes. Ils restent expérimentaux : leurs contrats logiciels sont testés, mais les performances des articles ne sont pas reproduites. La [matrice des 44 techniques](research_fidelity.md) décrit les écarts restants. Les exemples supposent des documents, encodeurs et modèles configurés par l'application.
+Les modes ci-dessous complètent les baselines existantes. Ils restent expérimentaux : leurs contrats logiciels sont testés, mais les performances des articles ne sont pas reproduites. La [matrice des 44 techniques](research_fidelity.md) décrit les écarts restants. Les [recettes complètes](research_recipes.md) couvrent aussi Self-RAG segmenté, Adaptive-RAG appris, LongRAG, CRAG sémantique, TimeR4 et SFT RAFT/RankRAG. Les exemples supposent des documents, encodeurs et modèles configurés par l'application.
 
 ## RAPTOR : clustering souple et parcours multi-niveau
 
@@ -107,7 +107,7 @@ Les groupes incomplets, masses nulles et valeurs invalides sont refusés.
 L'adaptateur ne produit aucune probabilité à partir d'un simple texte. Le moteur
 historique reste une approximation : la génération par segments, la recherche
 en faisceau et l'entraînement des reflection tokens ne sont pas implémentés par
-ces seuls calculs. [Self-RAG](https://arxiv.org/html/2310.11511v1).
+ces seuls calculs. Le nouveau `SegmentedSelfRAGEngine` avec `TransformersSelfRAGDecoder` réalise désormais les segments et le faisceau ; voir le [contrat dédié](../src/cheragh/self_rag/README.md). [Self-RAG](https://arxiv.org/html/2310.11511v1).
 
 ## RAFT : supervision ancrée et export SFT
 
@@ -126,7 +126,7 @@ records = RAFTDatasetBuilder(
 rows = [{"messages": record.to_messages()} for record in records]
 ```
 
-Les explications doivent contenir des citations sous la forme `##begin_quote##extrait exact##end_quote##`. Chaque citation doit appartenir à un document oracle et la réponse finale doit préserver la réponse de référence. Le générateur reçoit des copies des documents. Les oracles retirés ne figurent pas dans le contexte d'entrée, mais la supervision conserve les explications ancrées comme dans RAFT. Avec cinq documents de contexte, prévoir au moins cinq distracteurs par exemple pour les cas sans oracle. La validation vérifie les citations, pas toute la logique de l'explication. Le fine-tuning du LLM et son évaluation restent distincts. [RAFT, §3](https://arxiv.org/html/2403.10131v1).
+Les explications doivent contenir des citations sous la forme `##begin_quote##extrait exact##end_quote##`. Chaque citation doit appartenir à un document oracle et la réponse finale doit préserver la réponse de référence. Le générateur reçoit des copies des documents. Les oracles retirés ne figurent pas dans le contexte d'entrée, mais la supervision conserve les explications ancrées comme dans RAFT. Avec cinq documents de contexte, prévoir au moins cinq distracteurs par exemple pour les cas sans oracle. La validation vérifie les citations, pas toute la logique de l'explication. Le fine-tuning est disponible via `TransformersGenerativeTrainer.fit(records)` ; son évaluation hors entraînement reste distincte. [RAFT, §3](https://arxiv.org/html/2403.10131v1).
 
 ## Entraîner les encodeurs de retrieval
 
@@ -142,20 +142,20 @@ trainer = TorchRetrievalTrainer(
 metrics = trainer.fit(training_examples, epochs=3, batch_size=8, seed=42)
 ```
 
-Les encodeurs reçoivent une séquence de textes et renvoient un tenseur différentiable `(batch, dimension)`. L'optimiseur doit posséder leurs paramètres. Les exemples ordinaires utilisent une loss contrastive multi-positive; les exemples distillés utilisent `T² × KL(teacher || student)` avec leur température. Les candidats restent propres à chaque question pour éviter de transformer les positifs d'autres questions en faux négatifs. Les gradients non finis empêchent l'étape d'optimisation; les modes des modules sont restaurés après entraînement. Ce trainer ne réalise pas le fine-tuning RAFT d'un LLM, l'entraînement distribué, les checkpoints ou la préparation des modèles.
+Les encodeurs reçoivent une séquence de textes et renvoient un tenseur différentiable `(batch, dimension)`. L'optimiseur doit posséder leurs paramètres. Les exemples ordinaires utilisent une loss contrastive multi-positive; les exemples distillés utilisent `T² × KL(teacher || student)` avec leur température. Les candidats restent propres à chaque question pour éviter de transformer les positifs d'autres questions en faux négatifs. Les gradients non finis empêchent l'étape d'optimisation; les modes des modules sont restaurés après entraînement. Ce trainer optimise les encodeurs ; `TransformersGenerativeTrainer` assure séparément le SFT RAFT/RankRAG et les checkpoints génératifs. L’entraînement distribué reste hors périmètre.
 
 ## Validation avant déploiement
 
-La CI du noyau continue de tester Python 3.10 à 3.13. Un job CPU séparé installe UMAP, graspologic et PyTorch puis exécute les tests des nouveaux mécanismes sans téléchargement de poids. Pour reproduire localement :
+La CI du noyau continue de tester Python 3.10 à 3.13. Un job CPU séparé installe UMAP, graspologic, Transformers et PyTorch puis exécute les tests des nouveaux mécanismes sans téléchargement de poids. Pour reproduire localement :
 
 ```bash
-python -m pip install -e '.[dev,fastapi,raptor,graphrag,training]'
+python -m pip install -e '.[dev,fastapi,raptor,graphrag,training,research]'
 python -m pip check
-ruff check src tests
+ruff check src tests scripts
 mypy --no-incremental
 pytest
 python -m build
-python -m twine check dist/*
+python -m twine check dist/*.whl dist/*.tar.gz
 ```
 
 Une mise en production doit encore être qualifiée sur le corpus réel, avec les modèles choisis, les droits d'accès effectifs et la charge visée. Le [guide de production](production.md) décrit le déploiement, les sauvegardes et le retour arrière; le [serveur](production_server.md) conserve des limites explicites sur l'interruption des appels fournisseurs et la montée en charge.

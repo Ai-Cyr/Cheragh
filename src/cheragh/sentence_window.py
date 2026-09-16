@@ -4,11 +4,12 @@ Technique 12 : Sentence Window Retrieval — version persistable.
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .base import BaseRetriever, Document, EmbeddingModel, _validate_top_k, cosine_similarity
+from .base import BaseRetriever, Document, EmbeddingModel, _snapshot_documents, _validate_top_k, _validate_non_negative_int, cosine_similarity
 from .cache import hash_documents, embedder_fingerprint, load_cache, save_cache
 
 
@@ -34,14 +35,13 @@ class SentenceWindowRetriever(BaseRetriever):
         cache_path: Optional[str] = None,
         allow_unsafe_pickle: bool = False,
     ):
-        if window_size < 0:
-            raise ValueError("window_size doit être >= 0.")
+        _validate_non_negative_int(window_size, name="window_size")
 
         self.embedding_model = embedding_model
         self.window_size = window_size
         self._cache_path = cache_path
         self._allow_unsafe_pickle = allow_unsafe_pickle
-        self._documents = documents  # référence pour hash uniquement
+        self._documents = _snapshot_documents(documents)
 
         # State à construire ou à recharger
         self.sentences: List[str] = []
@@ -59,8 +59,7 @@ class SentenceWindowRetriever(BaseRetriever):
         top_k = _validate_top_k(top_k)
         query_vec = self.embedding_model.embed_query(query)
         scores = cosine_similarity(query_vec, self.sentence_embeddings)
-        fetch = max(top_k * 4, 20)
-        top_sentence_idx = np.argsort(scores)[::-1][:fetch]
+        top_sentence_idx = np.argsort(-scores, kind="stable")
 
         seen_windows: Dict[Tuple[int, int, int], Document] = {}
         for sent_idx in top_sentence_idx:
@@ -79,7 +78,8 @@ class SentenceWindowRetriever(BaseRetriever):
             seen_windows[key] = Document(
                 content=window_text,
                 metadata={
-                    **source_doc.metadata,
+                    **deepcopy(source_doc.metadata),
+                    "source_doc_id": source_doc.doc_id,
                     "matched_sentence": all_sents[si],
                     "window_start": start,
                     "window_end": end,
