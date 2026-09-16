@@ -99,6 +99,20 @@ La source distribution contient aussi les tests, scripts de vérification,
 workflows, Dockerfile et guides nécessaires pour reproduire ces contrôles sans
 checkout Git. La wheel ne contient que le paquet et ses métadonnées.
 
+### Compatibilité Sentence Transformers
+
+Les extras `local`, `rerank`, `learned-retrieval`, `multimodal` et `all`
+acceptent Sentence Transformers 6. La CI vérifie séparément les versions 5 et 6
+sur CPU, avec de petits modèles créés localement pour les embeddings, le
+reranking, les représentations par token et CLIP. Ces tests vérifient les
+interfaces et les résultats numériques, pas la qualité sur votre corpus.
+L’adaptateur CLIP encode séparément les textes et les images, puis restitue les
+vecteurs dans l’ordre des documents d’origine.
+Sentence Transformers 6 nécessite Transformers 5 ; verrouillez ces versions
+ensemble dans votre environnement de déploiement. Consultez le
+[guide de migration officiel](https://sbert.net/docs/migration_guide.html#migrating-from-v5-x-to-v6-x)
+pour les modèles personnalisés et les changements de pooling.
+
 ### Verrouiller les dépendances d'un déploiement
 
 Les bornes de versions de `pyproject.toml` protègent contre les changements de
@@ -125,6 +139,11 @@ réellement déployés :
 python -m pip install "pip-audit==2.10.1"
 python -m pip_audit --strict --progress-spinner=off -r requirements.lock
 ```
+
+Le workflow `dependency review` exige que **Dependency graph** soit activé
+dans les réglages de sécurité du dépôt GitHub. Conservez le seuil de blocage
+`high` et les permissions `contents: read`. Le graphe ne remplace pas l'audit
+des versions effectivement résolues pour le déploiement.
 
 Un audit de dépendances ne détecte pas les vulnérabilités de votre code, des
 modèles ou du système de base. Ajoutez l'analyse de code, d'image et de secrets

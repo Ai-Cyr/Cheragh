@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Support Sentence Transformers 6 alongside 5, with CPU integration tests for local embeddings, reranking, token embeddings and CLIP.
+- Encode CLIP text and image batches separately and restore document order, supporting versions that reject mixed-modality batches.
+
 - Correct HyQE additive candidate scoring, HyDE document-space averaging, true cosine, BM25 consistency and rank-based query/federated fusion.
 - Add trained SPLADE and ColBERTv2 encoders with checkpoint-specific tokenization/projection; correct ColPali processing and MaxSim masks.
 - Add passage-conditioned segmented Self-RAG with a Transformers logits decoder and bounded beam search.

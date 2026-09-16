@@ -3,7 +3,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 from pydantic import ValidationError
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
 
 from cheragh import Document, HashingEmbedding
 from cheragh.base import BaseRetriever, EmbeddingModel, LLMClient
@@ -393,9 +401,25 @@ class VectorStoreConsistencyTests(unittest.TestCase):
                 store.similarity_search("query", top_k=invalid)
 
     def test_all_extra_satisfies_learned_retrieval_minimum(self):
-        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-        all_section = pyproject.split("all = [", 1)[1].split("]", 1)[0]
-        self.assertIn('"sentence-transformers>=5.0,<6"', all_section)
+        path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        extras = tomllib.loads(path.read_text(encoding="utf-8"))["project"]["optional-dependencies"]
+        minimums = {}
+        for extra in ("all", "learned-retrieval"):
+            requirements = [
+                requirement for value in extras[extra]
+                if canonicalize_name((requirement := Requirement(value)).name) == "sentence-transformers"
+            ]
+            self.assertEqual(len(requirements), 1, extra)
+            lower_bounds = [
+                (Version(bound.version), bound.operator == ">")
+                for bound in requirements[0].specifier
+                if bound.operator in {">=", ">"}
+            ]
+            self.assertTrue(lower_bounds, f"{extra} must declare a minimum supported version")
+            minimums[extra] = max(lower_bounds)
+        # Compare parsed bounds, including whether the minimum is inclusive.
+        # Formatting changes and compatible upper-bound updates do not affect this contract.
+        self.assertGreaterEqual(minimums["all"], minimums["learned-retrieval"])
 
 
 if __name__ == "__main__":
