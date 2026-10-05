@@ -3,6 +3,6 @@
 numpy==2.5.2
 pydantic==2.13.5
 PyYAML==6.0.3
-fastapi==0.141.1
-uvicorn==0.52.4
-qdrant-client==1.19.0
+fastapi==0.142.2
+uvicorn==0.54.0
+qdrant-client==1.19.1
