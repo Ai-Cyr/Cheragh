@@ -15,6 +15,9 @@ not a substitute for a calibrated entailment model or human review.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import islice
+import math
+from numbers import Real
 import re
 from typing import Any, Iterable, Protocol
 
@@ -23,12 +26,18 @@ from ..base import (
     Document,
     ExtractiveLLMClient,
     LLMClient,
+    _snapshot_document,
+    _snapshot_documents,
     _validate_non_negative_int,
     _validate_top_k,
 )
 
 
 def _clamp_score(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("score must be a real number")
+    if not math.isfinite(float(value)):
+        raise ValueError("score must be finite")
     return max(0.0, min(1.0, float(value)))
 
 
@@ -41,6 +50,8 @@ class RetrievalDecision:
     reason: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.should_retrieve, bool):
+            raise TypeError("should_retrieve must be a boolean")
         object.__setattr__(self, "confidence", _clamp_score(self.confidence))
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,8 +100,11 @@ class EvidenceRelevance:
     reason: str = ""
 
     def __post_init__(self) -> None:
-        if self.document_index < 0:
-            raise ValueError("document_index must be >= 0")
+        _validate_non_negative_int(self.document_index, name="document_index")
+        if self.doc_id is not None and not isinstance(self.doc_id, str):
+            raise TypeError("doc_id must be a string or None")
+        if not isinstance(self.relevant, bool):
+            raise TypeError("relevant must be a boolean")
         object.__setattr__(self, "score", _clamp_score(self.score))
 
     def to_dict(self) -> dict[str, Any]:
@@ -109,6 +123,14 @@ class RelevanceAssessment:
 
     evidence: tuple[EvidenceRelevance, ...] = ()
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        evidence = tuple(self.evidence)
+        if not all(isinstance(item, EvidenceRelevance) for item in evidence):
+            raise TypeError("evidence must contain EvidenceRelevance objects")
+        if len({item.document_index for item in evidence}) != len(evidence):
+            raise ValueError("evidence must not contain duplicate document indices")
+        object.__setattr__(self, "evidence", evidence)
 
     @property
     def passed(self) -> bool:
@@ -143,6 +165,14 @@ class SupportAssessment:
     unsupported_claims: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.supported, bool):
+            raise TypeError("supported must be a boolean")
+        if isinstance(self.unsupported_claims, (str, bytes)):
+            raise TypeError("unsupported_claims must be an iterable of strings")
+        claims = tuple(self.unsupported_claims)
+        if not all(isinstance(claim, str) for claim in claims):
+            raise TypeError("unsupported_claims must contain strings")
+        object.__setattr__(self, "unsupported_claims", claims)
         object.__setattr__(self, "score", _clamp_score(self.score))
 
     def to_dict(self) -> dict[str, Any]:
@@ -178,6 +208,8 @@ class LexicalEvidenceCritic:
     """
 
     def __init__(self, relevance_threshold: float = 0.1, support_threshold: float = 0.55):
+        _clamp_score(relevance_threshold)
+        _clamp_score(support_threshold)
         if not 0.0 <= relevance_threshold <= 1.0:
             raise ValueError("relevance_threshold must be between 0 and 1")
         if not 0.0 <= support_threshold <= 1.0:
@@ -350,6 +382,7 @@ class SelfRAGResult:
     trace: SelfRAGTrace
     status: str
     maturity: str = "experimental"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def supported(self) -> bool | None:
@@ -364,6 +397,7 @@ class SelfRAGResult:
             "answer": self.answer,
             "status": self.status,
             "maturity": self.maturity,
+            "metadata": dict(self.metadata),
             "supported": self.supported,
             "documents": [
                 {
@@ -410,6 +444,8 @@ class SelfRAGEngine:
         self.insufficient_evidence_answer = insufficient_evidence_answer
 
     def ask(self, query: str, *, top_k: int | None = None, **generate_kwargs: Any) -> SelfRAGResult:
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
         query = " ".join(query.split())
         if not query:
             raise ValueError("query must not be empty")
@@ -424,15 +460,20 @@ class SelfRAGEngine:
         if retrieval.should_retrieve:
             if self.retriever is None:
                 raise RuntimeError("the retrieval gate requested evidence, but no retriever is configured")
-            retrieved = list(self.retriever.retrieve(query, top_k=selected_top_k))
-            if not all(isinstance(document, Document) for document in retrieved):
-                raise TypeError("retriever.retrieve() must return Document objects")
+            retrieved = _retrieval_snapshots(
+                self.retriever.retrieve(query, top_k=selected_top_k), limit=selected_top_k
+            )
             trace.retrieved_count = len(retrieved)
-            relevance = self.evidence_critic.assess_relevance(query, retrieved)
+            relevance = self.evidence_critic.assess_relevance(query, _snapshot_documents(retrieved))
             if not isinstance(relevance, RelevanceAssessment):
                 raise TypeError("evidence_critic.assess_relevance() must return RelevanceAssessment")
+            for grade in relevance.evidence:
+                if grade.document_index >= len(retrieved):
+                    raise ValueError("relevance assessment references an unknown document index")
+                if grade.doc_id != retrieved[grade.document_index].doc_id:
+                    raise ValueError("relevance assessment doc_id does not match the retrieved document")
             trace.relevance = relevance
-            valid_indices = {index for index in relevance.relevant_indices if index < len(retrieved)}
+            valid_indices = set(relevance.relevant_indices)
             documents = [document for index, document in enumerate(retrieved) if index in valid_indices]
             if not documents:
                 trace.stop_reason = "insufficient_relevant_evidence"
@@ -454,10 +495,12 @@ class SelfRAGEngine:
             else:
                 kind = "refinement"
                 prompt = _refinement_prompt(query, context, answer, previous_support)
-            answer = str(self.llm_client.generate(prompt, **generate_kwargs))
+            answer = self.llm_client.generate(prompt, **generate_kwargs)
+            if not isinstance(answer, str):
+                raise TypeError("llm_client.generate() must return a string")
             support: SupportAssessment | None = None
             if retrieval.should_retrieve:
-                support = self.evidence_critic.assess_support(query, answer, documents)
+                support = self.evidence_critic.assess_support(query, answer, _snapshot_documents(documents))
                 if not isinstance(support, SupportAssessment):
                     raise TypeError("evidence_critic.assess_support() must return SupportAssessment")
             trace.iterations.append(SelfRAGIteration(attempt + 1, kind, prompt, answer, support))
@@ -475,6 +518,25 @@ class SelfRAGEngine:
     def run(self, query: str, **kwargs: Any) -> SelfRAGResult:
         """Alias for :meth:`ask`."""
         return self.ask(query, **kwargs)
+
+
+def _retrieval_snapshots(documents: Iterable[Document], *, limit: int) -> list[Document]:
+    """Bound consumption of injected retrievers and isolate their evidence."""
+    snapshots = []
+    for document in islice(documents, limit):
+        if not isinstance(document, Document):
+            raise TypeError("retriever.retrieve() must return Document objects")
+        if not isinstance(document.content, str) or not isinstance(document.metadata, dict):
+            raise TypeError("retrieved documents must have string content and dict metadata")
+        if document.doc_id is not None and not isinstance(document.doc_id, str):
+            raise TypeError("retrieved document doc_id must be a string or None")
+        if document.score is not None:
+            if isinstance(document.score, bool) or not isinstance(document.score, Real):
+                raise TypeError("retrieved document score must be a real number or None")
+            if not math.isfinite(float(document.score)):
+                raise ValueError("retrieved document score must be finite")
+        snapshots.append(_snapshot_document(document))
+    return snapshots
 
 
 def _generation_prompt(query: str, context: str, has_evidence: bool) -> str:

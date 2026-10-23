@@ -11,6 +11,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from copy import deepcopy
 import math
 import string
+from threading import RLock
 from typing import Any
 
 from ..base import BaseRetriever, Document, _numpy, _validate_top_k
@@ -69,6 +70,7 @@ class LearnedSparseRetriever(BaseRetriever):
         self.documents: list[Document] = []
         self._document_vectors: list[SparseVector] = []
         self._dimension: int | None = None
+        self._lock = RLock()
         self.add_documents(documents)
 
     def add_documents(self, documents: Iterable[Document]) -> None:
@@ -82,15 +84,20 @@ class LearnedSparseRetriever(BaseRetriever):
             role="document",
             batch_size=self.batch_size,
         )
-        self._dimension = _merge_dimension(self._dimension, dimension, "sparse encoder")
-        self.documents.extend(new_documents)
-        self._document_vectors.extend(vectors)
+        with self._lock:
+            self._dimension = _merge_dimension(self._dimension, dimension, "sparse encoder")
+            self.documents.extend(new_documents)
+            self._document_vectors.extend(vectors)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         """Return documents ranked by the exact learned-sparse dot product."""
         _validate_query(query)
         _validate_top_k(top_k)
-        if not self.documents:
+        with self._lock:
+            documents = list(self.documents)
+            document_vectors = list(self._document_vectors)
+            dimension = self._dimension
+        if not documents:
             return []
 
         query_vectors, query_dimension = _encode_sparse(
@@ -99,11 +106,11 @@ class LearnedSparseRetriever(BaseRetriever):
             role="query",
             batch_size=self.batch_size,
         )
-        _merge_dimension(self._dimension, query_dimension, "sparse query encoder")
+        _merge_dimension(dimension, query_dimension, "sparse query encoder")
         query_vector = query_vectors[0]
-        scores = [_sparse_dot(query_vector, vector) for vector in self._document_vectors]
+        scores = [_sparse_dot(query_vector, vector) for vector in document_vectors]
         order = sorted(range(len(scores)), key=lambda index: (-scores[index], index))[:top_k]
-        return [_scored_copy(self.documents[index], scores[index], "learned_sparse") for index in order]
+        return [_scored_copy(documents[index], scores[index], "learned_sparse") for index in order]
 
 
 # SPLADE is the best-known learned sparse retrieval family. Keeping an alias
@@ -157,6 +164,7 @@ class ColBERTRetriever(BaseRetriever):
         self.documents: list[Document] = []
         self._document_vectors: list[Any] = []
         self._dimension: int | None = None
+        self._lock = RLock()
         self.add_documents(documents)
 
     def add_documents(self, documents: Iterable[Document]) -> None:
@@ -171,15 +179,20 @@ class ColBERTRetriever(BaseRetriever):
             batch_size=self.batch_size,
             normalize=self.normalize,
         )
-        self._dimension = _merge_dimension(self._dimension, dimension, "token encoder")
-        self.documents.extend(new_documents)
-        self._document_vectors.extend(vectors)
+        with self._lock:
+            self._dimension = _merge_dimension(self._dimension, dimension, "token encoder")
+            self.documents.extend(new_documents)
+            self._document_vectors.extend(vectors)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         """Return documents ranked by exact in-memory MaxSim scores."""
         _validate_query(query)
         _validate_top_k(top_k)
-        if not self.documents:
+        with self._lock:
+            documents = list(self.documents)
+            document_vectors = list(self._document_vectors)
+            dimension = self._dimension
+        if not documents:
             return []
 
         query_vectors, query_dimension = _encode_token_vectors(
@@ -189,11 +202,11 @@ class ColBERTRetriever(BaseRetriever):
             batch_size=self.batch_size,
             normalize=self.normalize,
         )
-        _merge_dimension(self._dimension, query_dimension, "query token encoder")
+        _merge_dimension(dimension, query_dimension, "query token encoder")
         query_vector = query_vectors[0]
-        scores = _batched_maxsim(query_vector, self._document_vectors, batch_size=self.score_batch_size)
+        scores = _batched_maxsim(query_vector, document_vectors, batch_size=self.score_batch_size)
         order = sorted(range(len(scores)), key=lambda index: (-scores[index], index))[:top_k]
-        return [_scored_copy(self.documents[index], scores[index], "colbert_maxsim") for index in order]
+        return [_scored_copy(documents[index], scores[index], "colbert_maxsim") for index in order]
 
 
 class SentenceTransformerTokenEncoder:

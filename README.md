@@ -249,6 +249,8 @@ Ces implémentations ont des tests de mécanismes, d’intégration et d’appre
 
 Voir les [recettes et dépendances](docs/research_recipes.md), l’[audit des 44 techniques](docs/sota_implementation_audit.md), la [matrice de fidélité](docs/research_fidelity.md) et les [résultats de vérification](docs/research_validation.md). Les API historiques restent disponibles ; la maturité n’est pas promue automatiquement par ces ajouts.
 
+La [matrice de qualification production](docs/architecture_production_matrix.md) relie les 44 techniques à leurs tests, préconditions de déploiement et limites. Elle couvre aussi les compositions, l'autorisation des preuves dérivées et les contrôles à effectuer avec les modèles et la charge réellement déployés.
+
 ## Sécurité et production
 
 - ACL et isolation tenant/collection peuvent fonctionner en mode fail-closed ;

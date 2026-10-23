@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
+from itertools import islice
 import math
 import random
 import re
@@ -90,6 +91,10 @@ class HardNegativeMiner:
         negatives_per_query: int = 4,
         exclusion_filter: Callable[[str, Document], bool] | None = None,
     ):
+        if not callable(getattr(retriever, "retrieve", None)):
+            raise TypeError("retriever must expose retrieve(query, top_k)")
+        if exclusion_filter is not None and not callable(exclusion_filter):
+            raise TypeError("exclusion_filter must be callable or None")
         self.retriever = retriever
         self.candidate_top_k = _validate_top_k(candidate_top_k, name="candidate_top_k")
         self.negatives_per_query = _validate_top_k(negatives_per_query, name="negatives_per_query")
@@ -102,6 +107,8 @@ class HardNegativeMiner:
         query: str,
         positive_documents: Sequence[Document],
     ) -> RetrievalTrainingExample:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("Training query must be a non-empty string")
         positives = _snapshots(positive_documents)
         if not positives:
             raise ValueError("Hard-negative mining requires positive documents")
@@ -109,11 +116,12 @@ class HardNegativeMiner:
         candidates = self.retriever.retrieve(query, top_k=self.candidate_top_k)
         negatives: list[Document] = []
         seen = set(positive_keys)
-        for candidate in candidates:
+        for result in islice(candidates, self.candidate_top_k):
+            candidate = _snapshot_document(result)
             key = _document_key(candidate)
             if key in seen:
                 continue
-            if self.exclusion_filter is not None and self.exclusion_filter(query, candidate):
+            if self.exclusion_filter is not None and self.exclusion_filter(query, _snapshot_document(candidate)):
                 continue
             negatives.append(_snapshot_document(candidate))
             seen.add(key)
@@ -180,6 +188,8 @@ class TeacherScoreDistiller:
         *,
         temperature: float = 1.0,
     ):
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+            raise TypeError("temperature must be a number")
         if temperature <= 0 or not math.isfinite(temperature):
             raise ValueError("temperature must be a finite number > 0")
         self.scorer = scorer
@@ -532,9 +542,10 @@ class RetrievalTrainingPipeline:
 def _softmax(scores: Sequence[float], *, temperature: float) -> tuple[float, ...]:
     if not scores:
         return ()
-    scaled = [score / temperature for score in scores]
-    maximum = max(scaled)
-    exponentials = [math.exp(score - maximum) for score in scaled]
+    # Shift before scaling: finite logits can overflow when divided by a small
+    # temperature. Negative overflow after shifting correctly maps to zero.
+    maximum = max(scores)
+    exponentials = [math.exp((score - maximum) / temperature) for score in scores]
     denominator = sum(exponentials)
     return tuple(value / denominator for value in exponentials)
 

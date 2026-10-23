@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fnmatch import fnmatch
+import math
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -52,6 +53,7 @@ def load_documents(
     ``exclude_patterns`` uses shell-style globs relative to the input directory.
     ``max_file_size_mb`` avoids accidentally indexing huge generated files.
     """
+    max_bytes = _max_file_size_bytes(max_file_size_mb)
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(str(p))
@@ -68,7 +70,7 @@ def load_documents(
         # stat/read.  In particular, never follow a file symlink (including one
         # below nested directories) outside the corpus selected by the caller.
         resolved_file = _resolve_contained_candidate(file_path, resolved_root)
-        if max_file_size_mb is not None and resolved_file.stat().st_size > max_file_size_mb * 1024 * 1024:
+        if max_bytes is not None and resolved_file.stat().st_size > max_bytes:
             continue
         if _looks_binary(resolved_file):
             continue
@@ -135,12 +137,27 @@ def _looks_binary(path: Path, sample_size: int = 4096) -> bool:
     if path.suffix.lower() in {".pdf", ".docx"}:
         return False
     try:
-        sample = path.read_bytes()[:sample_size]
+        with path.open("rb") as file:
+            sample = file.read(sample_size)
     except OSError:
         return True
     if not sample:
         return False
     return b"\x00" in sample
+
+
+def _max_file_size_bytes(value: float | None) -> float | None:
+    """Validate the ingestion limit before traversal or any document read."""
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError("max_file_size_mb must be a finite positive number or None")
+    return value * 1024 * 1024
 
 
 def _resolve_contained_candidate(path: Path, resolved_root: Path) -> Path:

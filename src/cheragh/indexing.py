@@ -18,6 +18,7 @@ from .ingestion.pipeline import (
     _combined_exclude_patterns,
     _is_excluded,
     _looks_binary,
+    _max_file_size_bytes,
     _resolve_contained_candidate,
 )
 from .vectorstores.memory import MemoryVectorStore
@@ -507,6 +508,7 @@ def scan_indexable_files(
 ) -> tuple[dict[str, IndexedFile], list[str]]:
     """Return content fingerprints for files that should be indexed."""
 
+    max_bytes = _max_file_size_bytes(max_file_size_mb)
     source = Path(path)
     if not source.exists():
         raise FileNotFoundError(str(source))
@@ -514,17 +516,19 @@ def scan_indexable_files(
     root = source.parent if source.is_file() else source
     resolved_root = root.resolve(strict=True)
     patterns = _combined_exclude_patterns(exclude_patterns)
-    max_bytes = None if max_file_size_mb is None else int(max_file_size_mb * 1024 * 1024)
     entries: dict[str, IndexedFile] = {}
     skipped: list[str] = []
     for file_path in candidates:
         resolved_path = _resolve_contained_candidate(file_path, resolved_root)
         resolved = str(resolved_path)
-        if _is_excluded(file_path, root, patterns) or _looks_binary(resolved_path):
+        if _is_excluded(file_path, root, patterns):
             skipped.append(resolved)
             continue
         stat = resolved_path.stat()
         if max_bytes is not None and stat.st_size > max_bytes:
+            skipped.append(resolved)
+            continue
+        if _looks_binary(resolved_path):
             skipped.append(resolved)
             continue
         stat, digest = _stable_file_fingerprint(resolved_path)

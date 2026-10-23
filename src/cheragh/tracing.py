@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 import math
@@ -68,13 +69,13 @@ class RAGTraceStep:
         if self.ended_at is None:
             self.ended_at = perf_counter()
             self.duration_ms = max(0.0, (self.ended_at - self.started_at) * 1000)
-        self.metadata.update(metadata)
+        self.metadata.update(deepcopy(metadata))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "duration_ms": self.duration_ms,
-            "metadata": self.metadata,
+            "metadata": deepcopy(self.metadata),
         }
 
 
@@ -100,7 +101,7 @@ class RAGTrace:
     _started_at_monotonic: float = field(default_factory=perf_counter, init=False, repr=False)
 
     def start_step(self, name: str, **metadata: Any) -> RAGTraceStep:
-        step = RAGTraceStep(name=name, started_at=perf_counter(), metadata=dict(metadata))
+        step = RAGTraceStep(name=name, started_at=perf_counter(), metadata=deepcopy(metadata))
         self.steps.append(step)
         return step
 
@@ -112,7 +113,7 @@ class RAGTrace:
                     {
                         "doc_id": getattr(doc, "doc_id", None),
                         "score": getattr(doc, "score", None),
-                        "metadata": dict(getattr(doc, "metadata", {}) or {}),
+                        "metadata": deepcopy(getattr(doc, "metadata", {}) or {}),
                     }
                     for doc in documents
                 ],
@@ -163,7 +164,7 @@ class RAGTrace:
             self.ended_at_unix = time()
             # Wall clocks can jump under NTP/manual adjustment; latency cannot.
             self.duration_ms = max(0.0, (perf_counter() - self._started_at_monotonic) * 1000)
-        self.metadata.update(metadata)
+        self.metadata.update(deepcopy(metadata))
 
     def to_dict(self, include_prompt: bool = False) -> dict[str, Any]:
         data = {
@@ -186,7 +187,7 @@ class RAGTrace:
             data["prompt"] = self.prompt
         elif self.prompt is not None:
             data["prompt_chars"] = len(self.prompt)
-        return data
+        return deepcopy(data)
 
     def export_jsonl(
         self,

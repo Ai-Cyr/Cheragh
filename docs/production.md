@@ -4,6 +4,43 @@ Ce guide décrit une base d'exploitation pour Cheragh 1.4.0. Le projet reste en
 bêta : validez chaque combinaison de fournisseur, modèle, vector store et corpus
 avec vos propres jeux d'évaluation avant de traiter du trafic réel.
 
+La [matrice des 44 techniques](architecture_production_matrix.md) détaille les
+tests et préconditions de chaque architecture. La qualification porte sur la
+composition complète, avec les modèles, le corpus, les droits et la charge
+réellement utilisés.
+
+## Migration des contrats d'architecture
+
+- `InMemoryConversationStore` conserve au plus 1 024 sessions et 100 tours par
+  session par défaut. Configurer `max_sessions` et `max_turns_per_session` selon
+  la rétention voulue ; les sessions les moins récemment utilisées sont évincées.
+  Utiliser un stockage applicatif pour la durabilité et plusieurs workers.
+- `RetrieveNode`, `CompressNode` et `GenerateNode` respectent un `top_k` strict.
+  Les deux derniers acceptent désormais ce paramètre (5 par défaut) ; une valeur
+  dans l'état du workflow prend la priorité. Pour transmettre 10 preuves dans
+  toute une chaîne, utiliser `initial_state={"top_k": 10}`. Les résultats invalides
+  sont refusés et les résultats excédentaires des fournisseurs sont bornés.
+- `evaluate_pipeline` mesure les preuves finales effectivement utilisées par
+  la réponse, après transformations, compression et packing. Il n'effectue plus
+  une seconde recherche indépendante. Employer `evaluate_retrieval` pour mesurer
+  le retriever brut ; recalculer les références de métriques en conséquence.
+- `InMemoryFeedbackStore.records` est un instantané isolé : écrire via `append`.
+  Les traces et résultats d'index sont également isolés des mutations externes.
+- Le cache historique `RAPTORRetriever` passe en version 2 et sera reconstruit
+  avec la provenance des feuilles. Les résumés mélangeant des sources autorisées
+  et refusées sont exclus pour le principal concerné.
+- `SQLRAGEngine.max_sql_steps` compte les instructions SQLite, y compris pendant
+  la lecture des lignes (100 000 par défaut). Recalibrer ce budget sur les requêtes
+  autorisées ; les tables temporaires ou attachées ne peuvent pas contourner
+  l'allowlist du schéma principal.
+- Le routeur historique exige un nom de route exact, insensible à la casse,
+  ou utilise la route de secours. Les diagnostics fédérés exposent le type
+  d'erreur fournisseur, sans son message potentiellement confidentiel.
+
+Les modèles utilisés pour l'entraînement et l'inférence doivent être séparés :
+modifier les mêmes poids pendant une requête n'est pas pris en charge. Les
+timeouts des transports restent nécessaires pour les fournisseurs synchrones.
+
 ## Profils vérifiés et migration des intégrations
 
 Le noyau et le serveur sont testés sous Python 3.10 à 3.13. La CI vérifie aussi

@@ -8,11 +8,13 @@ rule-based generator is included for tests, demos and constrained environments.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from pathlib import Path
 import csv
 import json
 import re
 import sqlite3
+from threading import RLock
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..base import Document, ExtractiveLLMClient, LLMClient, _validate_top_k
@@ -117,11 +119,12 @@ class SQLRAGEngine:
         max_sql_steps: int = 100_000,
     ):
         max_rows = _validate_top_k(max_rows, name="max_rows")
+        max_sql_steps = _validate_top_k(max_sql_steps, name="max_sql_steps")
         if connection is None:
             db = ":memory:" if database is None else str(database)
             if read_only and db != ":memory:":
                 db_path = Path(db).expanduser().resolve()
-                connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                connection = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
             else:
                 connection = sqlite3.connect(db)
         connection.row_factory = sqlite3.Row
@@ -131,7 +134,8 @@ class SQLRAGEngine:
         self.max_rows = max_rows
         self.read_only = read_only
         self.trace_enabled = trace_enabled
-        self.max_sql_steps = max(1_000, int(max_sql_steps))
+        self.max_sql_steps = max_sql_steps
+        self._execution_lock = RLock()
         if self.read_only:
             self._install_readonly_guards()
 
@@ -198,6 +202,10 @@ class SQLRAGEngine:
         self.table_allowlist.add(safe_table)
 
     def schema(self) -> list[TableSchema]:
+        with self._execution_lock:
+            return self._schema_unlocked()
+
+    def _schema_unlocked(self) -> list[TableSchema]:
         tables = []
         query = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         for row in self.connection.execute(query):
@@ -256,11 +264,11 @@ class SQLRAGEngine:
 
     def execute_sql(self, sql: str) -> SQLExecutionResult:
         valid_sql = self.validate_sql(sql)
-        cursor = self._execute_readonly(valid_sql)
-        rows_raw = cursor.fetchmany(self.max_rows + 1)
-        columns = [desc[0] for desc in cursor.description or []]
-        truncated = len(rows_raw) > self.max_rows
-        rows = [dict(row) for row in rows_raw[: self.max_rows]]
+        with self._execute_readonly(valid_sql) as cursor:
+            rows_raw = cursor.fetchmany(self.max_rows + 1)
+            columns = [desc[0] for desc in cursor.description or []]
+            truncated = len(rows_raw) > self.max_rows
+            rows = [dict(row) for row in rows_raw[: self.max_rows]]
         return SQLExecutionResult(sql=valid_sql, columns=columns, rows=rows, row_count=len(rows), truncated=truncated)
 
     def enable_read_only(self) -> None:
@@ -289,20 +297,63 @@ class SQLRAGEngine:
             # driver/build. The read-only URI and authorizer still enforce safety.
             pass
 
+    @contextmanager
     def _execute_readonly(self, sql: str):
-        if not self.read_only:
-            return self.connection.execute(sql)
-        steps = {"count": 0}
+        # SQLite evaluates rows lazily. Keep both guards installed through
+        # fetchmany(), not just execute(), and serialize changes to these
+        # connection-wide callbacks for explicitly shared connections.
+        with self._execution_lock:
+            steps = 0
+            interval = min(1000, self.max_sql_steps)
+            allowed = {str(name).lower() for name in self.table_allowlist}
+            unambiguous_main_tables: set[str] = set()
+            if allowed:
+                main_tables = {
+                    str(row[0]).lower() for row in self.connection.execute(
+                        "SELECT name FROM main.sqlite_master WHERE type IN ('table', 'view')"
+                    )
+                }
+                temporary_tables = {
+                    str(row[0]).lower() for row in self.connection.execute(
+                        "SELECT name FROM temp.sqlite_master WHERE type IN ('table', 'view')"
+                    )
+                }
+                unambiguous_main_tables = main_tables - temporary_tables
 
-        def progress_handler() -> int:
-            steps["count"] += 1
-            return 1 if steps["count"] > self.max_sql_steps else 0
+            def progress_handler() -> int:
+                nonlocal steps
+                steps += interval
+                return int(steps >= self.max_sql_steps)
 
-        self.connection.set_progress_handler(progress_handler, 1000)
-        try:
-            return self.connection.execute(sql)
-        finally:
-            self.connection.set_progress_handler(None, 0)
+            def authorizer(action, arg1, arg2, dbname, source):
+                # The regex validator provides readable early errors; SQLite's
+                # parser is the security boundary for quoted identifiers,
+                # comments, CTEs, views and schema-qualified table references.
+                if action == sqlite3.SQLITE_READ and allowed:
+                    # COUNT(*) can report a table read with an empty column
+                    # and no database name. A temp table can shadow main, or
+                    # an attached database can supply a missing main table;
+                    # refuse those ambiguous reads rather than trusting a name.
+                    if str(arg1).lower() not in allowed or dbname not in (None, "main"):
+                        return sqlite3.SQLITE_DENY
+                    if dbname is None and str(arg1).lower() not in unambiguous_main_tables:
+                        return sqlite3.SQLITE_DENY
+                return _sqlite_readonly_authorizer(action, arg1, arg2, dbname, source)
+
+            cursor = None
+            self.connection.set_authorizer(authorizer)
+            self.connection.set_progress_handler(progress_handler, interval)
+            try:
+                cursor = self.connection.execute(sql)
+                yield cursor
+            finally:
+                if cursor is not None:
+                    cursor.close()
+                self.connection.set_progress_handler(None, 0)
+                # A callable (rather than None) also works on Python 3.10.
+                self.connection.set_authorizer(
+                    _sqlite_readonly_authorizer if self.read_only else _sqlite_allow_authorizer
+                )
 
     def ask(
         self,
@@ -524,6 +575,10 @@ class StructuredRAG:
         return self.sql_engine.schema()
 
 
+def _sqlite_allow_authorizer(action, arg1, arg2, dbname, source):
+    return sqlite3.SQLITE_OK
+
+
 def _sqlite_readonly_authorizer(action, arg1, arg2, dbname, source):
     # ``schema()`` needs this introspection pragma. All user-provided SQL still
     # passes through ``validate_sql()``, which rejects every PRAGMA statement.
@@ -610,7 +665,10 @@ def _cte_names(sql: str) -> set[str]:
 
     return {
         match.group(1).lower()
-        for match in re.finditer(r"(?:\bwith\s+(?:recursive\s+)?|,\s*)([A-Za-z_]\w*)\s+as\s*\(", sql, flags=re.I)
+        for match in re.finditer(
+            r"(?:\bwith\s+(?:recursive\s+)?|,\s*)([A-Za-z_]\w*)"
+            r"\s*(?:\([^()]*\)\s*)?as\s*\(", sql, flags=re.I,
+        )
     }
 
 

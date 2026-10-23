@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 from copy import deepcopy
+from itertools import islice
 
 import numpy as np
 
@@ -51,7 +52,10 @@ class MMRRetriever(BaseRetriever):
         query_vec = self.embedding_model.embed_query(query)
 
         if self.base_retriever is not None:
-            candidates = self.base_retriever.retrieve(query, top_k=max(top_k, self.fetch_k))
+            candidate_limit = max(top_k, self.fetch_k)
+            candidates = _snapshot_documents(islice(
+                self.base_retriever.retrieve(query, top_k=candidate_limit), candidate_limit
+            ))
             if not candidates:
                 return []
             cand_embeddings = self.embedding_model.embed_documents([d.content for d in candidates])

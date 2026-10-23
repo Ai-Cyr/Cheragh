@@ -139,10 +139,12 @@ class SegmentedSelfRAGResult:
     log_score: float
     status: str
     maturity: str = "experimental_model_conditioned"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "query": self.query, "answer": self.answer, "status": self.status, "maturity": self.maturity,
+            "metadata": dict(self.metadata),
             "segments": [segment.to_dict() for segment in self.segments], "log_score": self.log_score,
             "documents": [{"doc_id": doc.doc_id, "content": doc.content,
                            "metadata": dict(doc.metadata), "score": doc.score} for doc in self.documents],

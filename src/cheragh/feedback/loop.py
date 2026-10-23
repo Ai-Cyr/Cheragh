@@ -1,11 +1,13 @@
 """User feedback collection and export utilities."""
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import json
 import uuid
+from threading import RLock
 from typing import Any, Iterable, Protocol
 
 
@@ -68,11 +70,22 @@ class FeedbackStore(Protocol):
 class InMemoryFeedbackStore:
     """Simple in-memory feedback store."""
 
-    def __init__(self):
-        self.records: list[FeedbackRecord] = []
+    def __init__(self) -> None:
+        self._records: list[FeedbackRecord] = []
+        self._lock = RLock()
+
+    @property
+    def records(self) -> list[FeedbackRecord]:
+        """Return an isolated snapshot; writes go through :meth:`append`."""
+        with self._lock:
+            return deepcopy(self._records)
 
     def append(self, record: FeedbackRecord) -> None:
-        self.records.append(record)
+        if not isinstance(record, FeedbackRecord):
+            raise TypeError("record must be a FeedbackRecord")
+        snapshot = deepcopy(record)
+        with self._lock:
+            self._records.append(snapshot)
 
     def list(self, **filters: Any) -> list[FeedbackRecord]:
         return _filter_records(self.records, filters)
@@ -133,8 +146,8 @@ class FeedbackLoop:
             if response_id is None:
                 trace = getattr(response, "trace", None)
                 response_id = getattr(trace, "request_id", None)
-            retrieved = [getattr(src, "doc_id", None) for src in getattr(response, "sources", []) or []]
-            retrieved = [str(item) for item in retrieved if item]
+            retrieved_ids = [getattr(src, "doc_id", None) for src in getattr(response, "sources", []) or []]
+            retrieved = [str(item) for item in retrieved_ids if item]
             resp_meta = getattr(response, "metadata", {}) or {}
             tenant_id = tenant_id or (resp_meta.get("tenant") or {}).get("tenant_id")
             collection_id = collection_id or (resp_meta.get("tenant") or {}).get("collection_id")

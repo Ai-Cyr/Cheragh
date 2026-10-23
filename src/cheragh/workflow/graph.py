@@ -56,8 +56,12 @@ class RAGWorkflow:
         self._incoming: dict[str, set[str]] = {}
 
     def add_node(self, name: str, component: Any) -> "RAGWorkflow":
-        if not name:
+        if not isinstance(name, str):
+            raise TypeError("node name must be a str")
+        if not name.strip():
             raise ValueError("node name cannot be empty")
+        if not callable(component) and not callable(getattr(component, "run", None)):
+            raise TypeError("workflow component must be callable or expose run(state)")
         if name in self.nodes:
             raise ValueError(f"node {name!r} already exists")
         self.nodes[name] = _WorkflowNode(name=name, component=component)
@@ -94,12 +98,12 @@ class RAGWorkflow:
         return self.run(query=query, initial_state=kwargs or None)
 
     def _execution_order(self, start_at: str | None = None) -> list[str]:
+        if start_at is not None and start_at not in self.nodes:
+            raise KeyError(f"Unknown start node: {start_at}")
         if not self.nodes:
             return []
         incoming = {name: set(values) for name, values in self._incoming.items()}
-        if start_at:
-            if start_at not in self.nodes:
-                raise KeyError(f"Unknown start node: {start_at}")
+        if start_at is not None:
             reachable = self._reachable_from(start_at)
             incoming = {name: {src for src in deps if src in reachable} for name, deps in incoming.items() if name in reachable}
         else:
@@ -143,6 +147,36 @@ class RAGWorkflow:
                 # Some extension callables do not expose a signature. Preserve
                 # the documented state-dict convention and execute only once.
                 return component(state)
+            # Named inputs receive only their declared state keys. A dedicated
+            # `state` parameter retains the documented mutable-mapping API.
+            parameters = signature.parameters
+            if "state" not in parameters:
+                accepts_extra = any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+                inputs = state if accepts_extra else {
+                    name: state[name]
+                    for name, parameter in parameters.items()
+                    if name in state and parameter.kind in {
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    }
+                }
+                try:
+                    if not inputs and any(parameter.kind in {
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.VAR_POSITIONAL,
+                    } for parameter in parameters.values()):
+                        # Optional positional mapping adapters (data=None) and
+                        # *args adapters still receive the state mapping.
+                        raise TypeError
+                    signature.bind(**inputs)
+                except TypeError:
+                    pass
+                else:
+                    return component(**inputs)
             try:
                 signature.bind(state)
             except TypeError:

@@ -15,7 +15,9 @@ from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
+import math
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from ..base import BaseRetriever, Document, ExtractiveLLMClient, LLMClient, _numpy, _validate_top_k
@@ -182,9 +184,12 @@ class MultimodalRetriever(BaseRetriever):
         self.embedding_model = embedding_model
         self.documents: list[MultimodalDocument] = []
         self.embeddings: Any | None = None
+        self._lock = RLock()
         self.modality_weights: dict[Modality, float] = {
             Modality(key): float(value) for key, value in (modality_weights or {}).items()
         }
+        if any(not math.isfinite(value) or value < 0 for value in self.modality_weights.values()):
+            raise ValueError("modality_weights must contain finite non-negative values")
         self.add_documents(documents)
 
     def add_documents(self, documents: Iterable[MultimodalDocument]) -> None:
@@ -192,16 +197,19 @@ class MultimodalRetriever(BaseRetriever):
         docs = [_snapshot_multimodal_document(doc) for doc in documents]
         if not docs:
             return
-        vectors = np.asarray(self.embedding_model.embed_documents(docs), dtype=float)
-        if vectors.ndim != 2 or vectors.shape[0] != len(docs):
+        encoder_docs = [_snapshot_multimodal_document(doc) for doc in docs]
+        vectors = np.array(self.embedding_model.embed_documents(encoder_docs), dtype=float, copy=True)
+        if vectors.ndim != 2 or vectors.shape[0] != len(docs) or vectors.shape[1] == 0:
             raise ValueError("Multimodal document embeddings must have shape (documents, dimension)")
         if not np.isfinite(vectors).all():
             raise ValueError("Multimodal embeddings must contain only finite values")
         vectors = _normalize_rows(vectors)
-        if self.embeddings is not None and self.embeddings.shape[1] != vectors.shape[1]:
-            raise ValueError("New multimodal embeddings use a different dimension")
-        self.documents.extend(docs)
-        self.embeddings = vectors if self.embeddings is None else np.vstack([self.embeddings, vectors])
+        with self._lock:
+            if self.embeddings is not None and self.embeddings.shape[1] != vectors.shape[1]:
+                raise ValueError("New multimodal embeddings use a different dimension")
+            embeddings = vectors if self.embeddings is None else np.vstack([self.embeddings, vectors])
+            self.documents.extend(docs)
+            self.embeddings = embeddings
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         _validate_top_k(top_k)
@@ -216,31 +224,34 @@ class MultimodalRetriever(BaseRetriever):
     ) -> list[MultimodalDocument]:
         np = _numpy()
         _validate_top_k(top_k)
-        if not self.documents or self.embeddings is None:
+        with self._lock:
+            documents = list(self.documents)
+            embeddings = self.embeddings
+        if not documents or embeddings is None:
             return []
         allowed = {Modality(value) for value in modalities} if modalities is not None else None
         candidates = [
             index
-            for index, doc in enumerate(self.documents)
+            for index, doc in enumerate(documents)
             if (allowed is None or doc.modality in allowed) and metadata_matches(doc.metadata, filters)
         ]
         if not candidates:
             return []
         vector = np.asarray(self.embedding_model.embed_query(query), dtype=float).reshape(-1)
-        if vector.size != self.embeddings.shape[1] or not np.isfinite(vector).all():
+        if vector.size != embeddings.shape[1] or not np.isfinite(vector).all():
             raise ValueError("Multimodal query embedding has an invalid dimension or values")
         norm = float(np.linalg.norm(vector))
         vector = vector / norm if norm else vector
-        scores = self.embeddings[candidates] @ vector
+        scores = embeddings[candidates] @ vector
         for position, index in enumerate(candidates):
-            scores[position] *= self.modality_weights.get(self.documents[index].modality, 1.0)
+            scores[position] *= self.modality_weights.get(documents[index].modality, 1.0)
         order = np.argsort(scores)[::-1][:top_k]
         results: list[MultimodalDocument] = []
         for local_index in order:
             index = candidates[int(local_index)]
-            source = self.documents[index]
+            source = documents[index]
             metadata = {
-                **source.metadata,
+                **deepcopy(source.metadata),
                 "modality": source.modality.value,
                 "uri": source.uri,
                 "mime_type": source.mime_type,

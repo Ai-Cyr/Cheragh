@@ -453,7 +453,10 @@ def create_app(
     @app.get("/ready")
     async def ready():
         try:
-            is_ready = readiness_check() if readiness_check is not None else engine is not None
+            is_ready = (
+                await operation_limiter.run(readiness_check, timeout_seconds=request_timeout_seconds)
+                if readiness_check is not None else engine is not None
+            )
             if not isinstance(is_ready, bool):
                 # A sync wrapper can still accidentally return a coroutine.
                 # Close it without running user code or emitting an unawaited
