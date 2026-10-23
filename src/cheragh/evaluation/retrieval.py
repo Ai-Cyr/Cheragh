@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import islice
 import math
 from typing import Iterable, Mapping, Sequence
 
@@ -47,6 +48,17 @@ def evaluate_retrieval(
     - ``context_precision@k``: average precision over the retrieved context list.
     """
     top_k = _validate_top_k(top_k)
+    parsed = [_parse_example(example) for example in examples]
+    return _evaluate_retrieval_results(
+        ((example, retriever.retrieve(example.query, top_k=top_k)) for example in parsed),
+        top_k=top_k,
+    )
+
+
+def _evaluate_retrieval_results(
+    results: Iterable[tuple[RetrievalExample, Iterable[Document]]], *, top_k: int
+) -> RetrievalEvaluationResult:
+    """Score the supplied evidence without performing another retrieval."""
     rows: list[dict] = []
     hit_count = 0
     reciprocal_ranks: list[float] = []
@@ -55,9 +67,8 @@ def evaluate_retrieval(
     ndcgs: list[float] = []
     context_precisions: list[float] = []
 
-    parsed = [_parse_example(example) for example in examples]
-    for example in parsed:
-        docs = retriever.retrieve(example.query, top_k=top_k)[:top_k]
+    for example, documents in results:
+        docs = list(islice(documents, top_k))
         retrieved_ids = [doc.doc_id for doc in docs if doc.doc_id is not None]
         expected = set(example.expected_doc_ids)
         relevance_scores = [_relevance(doc, example) for doc in docs]
@@ -100,7 +111,7 @@ def evaluate_retrieval(
             }
         )
 
-    n = len(parsed) or 1
+    n = len(rows) or 1
     return RetrievalEvaluationResult(
         metrics={
             f"hit_rate@{top_k}": hit_count / n,
@@ -160,15 +171,15 @@ def _parse_example(example: RetrievalExample | dict) -> RetrievalExample:
             expected_doc_ids=set(example.expected_doc_ids),
             graded_relevance={doc_id: 1.0 for doc_id in example.expected_doc_ids},
         )
-    expected = example.get("expected_doc_ids", example.get("expected", []))
-    if isinstance(expected, str):
-        expected = [expected]
+    expected_values = example.get("expected_doc_ids", example.get("expected", []))
+    if isinstance(expected_values, str):
+        expected_values = [expected_values]
     graded = example.get("graded_relevance", example.get("relevance", {})) or {}
     if isinstance(graded, Mapping):
         graded_relevance = {str(key): float(value) for key, value in graded.items()}
     else:
         graded_relevance = {}
-    expected_set = set(str(doc_id) for doc_id in expected)
+    expected_set = set(str(doc_id) for doc_id in expected_values)
     if any(not math.isfinite(score) or score < 0 for score in graded_relevance.values()):
         raise ValueError("Graded relevance must be finite and non-negative")
     expected_set.update(key for key, score in graded_relevance.items() if score > 0)

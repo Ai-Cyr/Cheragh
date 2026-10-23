@@ -8,6 +8,7 @@ with an LLM/entity extractor later without changing the public engine API.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable
@@ -108,12 +109,7 @@ class GraphRAGRetriever(BaseRetriever):
     ):
         # Snapshot caller-owned documents instead of retaining (and mutating)
         # them: assigning doc_id in place would leak into the caller's objects.
-        self.documents = {}
-        for idx, doc in enumerate(documents):
-            snapshot = _snapshot_document(doc)
-            doc_id = snapshot.doc_id or f"doc-{idx}"
-            snapshot.doc_id = doc_id
-            self.documents[doc_id] = snapshot
+        self.documents = {document.doc_id: document for document in _snapshot_graph_documents(documents)}
         self.graph = graph
         self.fallback_retriever = fallback_retriever
         self.graph_depth = graph_depth
@@ -131,7 +127,7 @@ class GraphRAGRetriever(BaseRetriever):
                 continue
             merged[doc_id] = Document(
                 source.content,
-                metadata={**source.metadata, "retrieval_method": "graph", "matched_entities": entities},
+                metadata={**deepcopy(source.metadata), "retrieval_method": "graph", "matched_entities": entities},
                 doc_id=source.doc_id,
                 score=(source.score or 0.0) + self.graph_boost,
             )
@@ -141,7 +137,7 @@ class GraphRAGRetriever(BaseRetriever):
                 key = doc.doc_id or doc.content
                 previous = merged.get(key)
                 if previous is None or (doc.score or 0.0) > (previous.score or 0.0):
-                    metadata = {**doc.metadata, "retrieval_method": metadata_method(doc.metadata, "fallback")}
+                    metadata = {**deepcopy(doc.metadata), "retrieval_method": metadata_method(doc.metadata, "fallback")}
                     merged[key] = Document(doc.content, metadata=metadata, doc_id=doc.doc_id, score=doc.score)
 
         ordered = sorted(merged.values(), key=lambda doc: (doc.score is not None, doc.score or 0.0), reverse=True)
@@ -174,11 +170,7 @@ class GraphRAGEngine:
         top_k: int = 5,
         **engine_kwargs: Any,
     ):
-        self.documents = [Document(doc.content, metadata=dict(doc.metadata), doc_id=doc.doc_id, score=doc.score) for doc in documents]
-        # Stamp stable ids on the engine-owned copies so graph doc_ids, the
-        # retriever's index and the fallback store all agree on identity.
-        for idx, doc in enumerate(self.documents):
-            doc.doc_id = doc.doc_id or f"doc-{idx}"
+        self.documents = _snapshot_graph_documents(documents)
         self.embedding_model = embedding_model or HashingEmbedding()
         self.llm_client = llm_client or ExtractiveLLMClient()
         self.graph = graph or build_knowledge_graph(self.documents)
@@ -199,13 +191,21 @@ class GraphRAGEngine:
     def ask(self, query: str, top_k: int | None = None, **generate_kwargs: Any) -> RAGResponse:
         if top_k is not None:
             top_k = _validate_top_k(top_k)
-        response = self.engine.ask(query, top_k=top_k, **generate_kwargs)
+        engine = copy(self.engine)
+        # Authorization wrappers replace the public retriever on a request-local
+        # engine copy. The original inner engine still holds the unscoped one.
+        engine.retriever = self.retriever
+        response = engine.ask(query, top_k=top_k, **generate_kwargs)
         entities = _extract_entities(query)
+        source_ids = {document.doc_id for document in response.retrieved_documents}
+        triples = [triple for triple in self.graph.triples_for_entities(entities, depth=1)
+                   if triple.doc_id in source_ids
+                   and set(triple.metadata.get("source_doc_ids", [triple.doc_id])) <= source_ids]
         response.metadata.update(
             {
                 "architecture": "graph_rag",
                 "query_entities": entities,
-                "graph_triples": [triple.to_dict() for triple in self.graph.triples_for_entities(entities, depth=1)[:20]],
+                "graph_triples": [deepcopy(triple.to_dict()) for triple in triples[:20]],
             }
         )
         return response
@@ -217,14 +217,32 @@ class GraphRAGEngine:
 
 def build_knowledge_graph(documents: Iterable[Document]) -> KnowledgeGraph:
     graph = KnowledgeGraph()
-    for idx, doc in enumerate(documents):
-        doc_id = doc.doc_id or f"doc-{idx}"
+    for doc in _snapshot_graph_documents(documents):
+        doc_id = doc.doc_id
         for triple in extract_triples(doc.content, doc_id=doc_id, metadata=doc.metadata):
             graph.add_triple(triple)
         # Ensure entity-to-document mapping exists even without explicit triples.
         for entity in _extract_entities(doc.content):
             graph.entity_to_doc_ids[_norm_entity(entity)].add(doc_id)
     return graph
+
+
+def _snapshot_graph_documents(documents: Iterable[Document]) -> list[Document]:
+    snapshots = [_snapshot_document(document) for document in documents]
+    explicit_ids = [document.doc_id for document in snapshots if document.doc_id is not None]
+    if any(not isinstance(doc_id, str) or not doc_id.strip() for doc_id in explicit_ids):
+        raise ValueError("Graph document IDs must be non-empty strings or None")
+    if len(explicit_ids) != len(set(explicit_ids)):
+        raise ValueError("Graph document IDs must be unique")
+    used_ids = set(explicit_ids)
+    for index, document in enumerate(snapshots):
+        if document.doc_id is None:
+            candidate = f"doc-{index}"
+            while candidate in used_ids:
+                candidate += "-"
+            document.doc_id = candidate
+            used_ids.add(candidate)
+    return snapshots
 
 
 def extract_triples(text: str, doc_id: str | None = None, metadata: dict[str, Any] | None = None) -> list[KnowledgeTriple]:

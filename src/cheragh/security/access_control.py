@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Any, Iterable, Mapping
 
-from ..base import BaseRetriever, Document, _validate_top_k
+from ..base import BaseRetriever, Document, _snapshot_document, _validate_top_k
 
 
 _CLASSIFICATION_ORDER = {
@@ -128,7 +129,8 @@ class AccessPolicy:
         for doc in documents:
             decision = self.authorize(doc, principal)
             if decision.allowed:
-                enriched = Document(doc.content, metadata={**doc.metadata, "access_decision": decision.reason}, doc_id=doc.doc_id, score=doc.score)
+                enriched = _snapshot_document(doc)
+                enriched.metadata["access_decision"] = decision.reason
                 filtered.append(enriched)
         return filtered
 
@@ -162,20 +164,22 @@ class AccessControlledRetriever(BaseRetriever):
         self.last_denied_count = 0
         self.last_scanned_count = 0
         self.last_candidate_limit_reached = False
-        # Hierarchical retrievers must authorize original evidence before
-        # exposing derived summaries. Flattened metadata cannot express an
-        # arbitrary policy over every source that contributed to a summary.
-        authorize_sources = getattr(retriever, "for_principal", None)
-        self._authorized_retriever = (authorize_sources(self.principal, policy=self.policy)
-                                      if callable(authorize_sources) else None)
-        if self._authorized_retriever is not None and not callable(getattr(self._authorized_retriever, "retrieve", None)):
-            raise TypeError("for_principal must return an authorized retriever")
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         top_k = _validate_top_k(top_k)
-        if self._authorized_retriever is not None:
+        from ..long_rag import LongRAGRetriever
+
+        if isinstance(self.retriever, LongRAGRetriever):
+            return [group.as_document() for group in self.retrieve_groups(query, top_k=top_k)]
+        # Authorize original evidence before exposing derived summaries, and
+        # rebuild the scoped view for each request so revocations take effect.
+        authorize_sources = getattr(self.retriever, "for_principal", None)
+        authorized = authorize_sources(self.principal, policy=self.policy) if callable(authorize_sources) else None
+        if callable(authorize_sources) and not callable(getattr(authorized, "retrieve", None)):
+            raise TypeError("for_principal must return an authorized retriever")
+        if authorized is not None:
             limit = min(top_k, self.max_candidates)
-            documents = list(self._authorized_retriever.retrieve(query, top_k=limit))[:limit]
+            documents = [_snapshot_document(document) for document in islice(authorized.retrieve(query, top_k=limit), limit)]
             self.last_scanned_count = len(documents)
             self.last_denied_count = 0
             self.last_candidate_limit_reached = top_k > self.max_candidates
@@ -189,7 +193,7 @@ class AccessControlledRetriever(BaseRetriever):
         self.last_candidate_limit_reached = False
 
         while True:
-            docs = list(self.retriever.retrieve(query, top_k=candidate_limit))
+            docs = list(islice(self.retriever.retrieve(query, top_k=candidate_limit), candidate_limit))
             unseen: list[Document] = []
             for rank, document in enumerate(docs):
                 key = (rank, str(document.doc_id or ""), document.content)
@@ -218,6 +222,25 @@ class AccessControlledRetriever(BaseRetriever):
         self.last_scanned_count = len(seen)
         self.last_denied_count = max(0, self.last_scanned_count - len(allowed))
         return allowed[:top_k]
+
+    def retrieve_groups(self, query: str, top_k: int = 5, **kwargs: Any) -> list[Any]:
+        """Apply LongRAG authorization to original sources before regrouping."""
+        from ..long_rag import LongRAGRetriever
+
+        if not isinstance(self.retriever, LongRAGRetriever):
+            raise TypeError("group retrieval requires a LongRAGRetriever")
+        for name in ("principal", "access_policy"):
+            if kwargs.pop(name, None) is not None:
+                raise ValueError(f"cannot override {name} on an access-controlled retriever")
+        top_k = _validate_top_k(top_k)
+        limit = min(top_k, self.max_candidates)
+        groups = self.retriever.retrieve_groups(
+            query, top_k=limit, principal=self.principal, access_policy=self.policy, **kwargs
+        )
+        self.last_scanned_count = len(groups)
+        self.last_denied_count = 0
+        self.last_candidate_limit_reached = top_k > self.max_candidates
+        return groups
 
 
 class AccessControlledRAGEngine:
@@ -265,6 +288,14 @@ class AccessControlledRAGEngine:
         if engine is engine_template:
             raise TypeError("base_engine must support request-local shallow copying")
         engine.retriever = retriever
+        # Corrective RAG may obtain replacement evidence from a second source.
+        # It must cross the same authorization boundary before grading or use.
+        external_retriever = getattr(engine_template, "external_retriever", None)
+        if external_retriever is not None:
+            engine.external_retriever = AccessControlledRetriever(
+                external_retriever, principal=principal, policy=self.policy,
+                overfetch_factor=self.overfetch_factor, max_candidates=self.max_candidates,
+            )
         return engine
 
     def ask(self, query: str, principal: Principal | Mapping[str, Any] | None = None, **kwargs: Any) -> Any:
@@ -273,17 +304,21 @@ class AccessControlledRAGEngine:
         principal_obj = _coerce_principal(principal) if principal is not None else self.default_principal
         engine = self.for_principal(principal_obj)
         response = engine.ask(query, **kwargs)
+        retrievers = [engine.retriever]
+        external_retriever = getattr(engine, "external_retriever", None)
+        if isinstance(external_retriever, AccessControlledRetriever):
+            retrievers.append(external_retriever)
+        if "access_control_enabled" in response.metadata:
+            response.metadata["access_control_enabled"] = True
         response.metadata.setdefault("access_control", {})
         response.metadata["access_control"].update(
             {
                 "enabled": True,
                 "user_id": principal_obj.user_id,
-                "denied_documents": getattr(engine.retriever, "last_denied_count", 0),
-                "scanned_documents": getattr(engine.retriever, "last_scanned_count", 0),
-                "candidate_limit_reached": getattr(
-                    engine.retriever,
-                    "last_candidate_limit_reached",
-                    False,
+                "denied_documents": sum(getattr(item, "last_denied_count", 0) for item in retrievers),
+                "scanned_documents": sum(getattr(item, "last_scanned_count", 0) for item in retrievers),
+                "candidate_limit_reached": any(
+                    getattr(item, "last_candidate_limit_reached", False) for item in retrievers
                 ),
             }
         )

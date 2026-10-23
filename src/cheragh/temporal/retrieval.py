@@ -11,6 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from itertools import islice
 import math
 from numbers import Real
 from typing import Any, Mapping
@@ -285,13 +286,20 @@ class TemporalRetriever(BaseRetriever):
         """Retrieve an independent snapshot for a point in time or time range."""
 
         top_k = _validate_top_k(top_k)
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        query = " ".join(query.split())
+        if not query:
+            raise ValueError("query must not be empty")
         if any(value is not None for value in (as_of, start, end)):
             point, range_start, range_end = _validate_window(as_of=as_of, start=start, end=end)
         else:
             point, range_start, range_end = self._default_window
 
         requested_candidates = max(top_k, self.candidate_top_k)
-        raw_documents = list(self.base_retriever.retrieve(query, top_k=requested_candidates))
+        raw_documents = list(islice(
+            self.base_retriever.retrieve(query, top_k=requested_candidates), requested_candidates
+        ))
         candidates = [self._candidate(document, rank) for rank, document in enumerate(raw_documents)]
         candidates = [
             candidate
@@ -334,6 +342,13 @@ class TemporalRetriever(BaseRetriever):
     def _candidate(self, source: Document, rank: int) -> _TemporalCandidate:
         if not isinstance(source, Document):
             raise TypeError("base_retriever must return Document instances")
+        if not isinstance(source.content, str) or not isinstance(source.metadata, dict):
+            raise TypeError("retrieved documents must have string content and dict metadata")
+        if source.score is not None:
+            if isinstance(source.score, bool) or not isinstance(source.score, Real):
+                raise TypeError("retrieved document score must be a real number or None")
+            if not math.isfinite(float(source.score)):
+                raise ValueError("retrieved document score must be finite")
         document = _snapshot_document(source)
         timestamp_value = document.metadata.get(self.timestamp_key)
         timestamp = _optional_datetime(timestamp_value, name=f"metadata[{self.timestamp_key!r}]")

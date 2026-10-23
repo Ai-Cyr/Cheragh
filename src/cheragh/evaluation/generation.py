@@ -82,9 +82,10 @@ def evaluate_generation(rows: Iterable[dict]) -> GenerationEvaluationResult:
         query = str(row.get("query", ""))
         contexts = row.get("contexts", []) or row.get("documents", []) or []
         source_ids = row.get("source_ids", row.get("expected_doc_ids", [])) or []
+        expected_ids = row.get("expected_doc_ids", source_ids) or []
         values = {
             "citation_accuracy": citation_accuracy(answer, source_ids),
-            "citation_coverage": citation_coverage(answer, source_ids),
+            "citation_coverage": citation_coverage(answer, expected_ids),
             "groundedness": lexical_groundedness(answer, contexts),
             "answer_relevance": answer_relevance(answer, query),
         }
