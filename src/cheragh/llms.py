@@ -5,6 +5,7 @@ unless an integration is explicitly used.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import math
 from numbers import Real
@@ -119,10 +120,23 @@ class AnthropicClient(LLMClient):
         self.model = model
 
     def generate(self, prompt: str, temperature: float = 0.0, max_tokens: int = 1024, **kwargs: Any) -> str:
-        message = self.client.messages.create(
+        create = self.client.messages.create
+        try:
+            parameters = inspect.signature(create).parameters
+        except (TypeError, ValueError):
+            parameters = None
+        if parameters is None or "temperature" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            kwargs["temperature"] = temperature
+        else:
+            # Newer SDKs omit temperature from their typed signature. Preserve
+            # the wire payload for models that support it, using the SDK escape
+            # hatch. As with the SDK, explicit extra_body values take precedence.
+            kwargs["extra_body"] = {"temperature": temperature, **(kwargs.get("extra_body") or {})}
+        message = create(
             model=self.model,
             max_tokens=max_tokens,
-            temperature=temperature,
             messages=[{"role": "user", "content": prompt}],
             **kwargs,
         )

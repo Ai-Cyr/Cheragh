@@ -43,6 +43,18 @@ timeouts des transports restent nécessaires pour les fournisseurs synchrones.
 
 ## Profils vérifiés et migration des intégrations
 
+L'extra `anthropic` accepte les SDK 0.x et 1.x. Le SDK 1.x utilise `httpx2` :
+si l'application fournit `http_client`, `timeout`, `base_url` ou un transport
+HTTP sous forme d'objet, ces objets doivent appartenir à `httpx2` avec le SDK
+1.x, et à `httpx` avec le SDK 0.x. Les valeurs simples (URL texte, timeout
+numérique) restent utilisables dans les deux cas. Sans client HTTP injecté,
+le SDK choisit son transport. Les tests de sérialisation conservent les mêmes
+assertions sur le modèle, les messages, les options et le texte retourné.
+Si le SDK ne déclare plus `temperature` dans sa signature, l'adaptateur la
+transmet via `extra_body` pour conserver le même JSON. Comme dans le SDK,
+une valeur explicitement fournie dans `extra_body` prend priorité ; les autres
+champs sont conservés et le dictionnaire de l'appelant n'est pas modifié.
+
 Le noyau et le serveur sont testés sous Python 3.10 à 3.13. La CI vérifie aussi
 les vrais SDK FAISS, Chroma et Qdrant avec stockage local, ainsi que la
 sérialisation des requêtes Anthropic avec un transport HTTP simulé. Ces contrôles
