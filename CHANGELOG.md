@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Enforce source authorization across GraphRAG, Community GraphRAG and legacy RAPTOR, including derived reports, request-local retrievers and mutable metadata boundaries.
+- Keep learned and multimodal index documents aligned with embeddings during concurrent ingestion; validate provider embedding identities and finite vectors before publication.
+- Bound custom retriever/generator consumption in Self-RAG, Temporal RAG, MMR, compression, workflows and hard-negative mining; reject invalid critic attribution and scores.
+- Enforce SQL table authorization with SQLite's parser and retain execution guards through row fetching; isolate federated diagnostics across concurrent and nested calls.
+- Bound conversation memory with configurable session/turn retention, preserve stream cleanup and run readiness checks under HTTP deadlines and capacity limits.
+- Evaluate actual final pipeline evidence in one engine call, isolate feedback/traces from caller mutations and stabilize distillation for extreme scores.
+- Document deployment qualification for every catalogue technique in `docs/architecture_production_matrix.md`, retaining explicit model, hardware and load-testing limits.
+
 - Keep HTTP response conversion inside request deadlines and capacity limits; reject invalid readiness callbacks before reporting healthy.
 - Hide credential-bearing validation inputs and URLs in configuration diagnostics.
 - Restore current Qdrant query compatibility and Chroma documents without metadata; replace Chroma metadata snapshots completely and validate vector batches before index mutation.

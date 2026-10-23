@@ -18,11 +18,21 @@ def _normalize(matrix: np.ndarray) -> np.ndarray:
     if matrix.size == 0:
         return matrix
     if matrix.ndim == 1:
-        norm = np.linalg.norm(matrix)
+        norm = np.linalg.norm(matrix.astype(np.float64))
         return matrix / norm if norm > 0 else matrix
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    # Finite float32 coordinates may overflow when their squares are summed.
+    # Accumulate in float64 so normalization cannot silently erase a vector.
+    norms = np.linalg.norm(matrix.astype(np.float64), axis=1, keepdims=True)
     norms[norms == 0] = 1.0
-    return matrix / norms
+    return (matrix / norms).astype(np.float32)
+
+
+def _provider_vectors(value: Any, *, rows: int, normalize: bool = True) -> np.ndarray:
+    """Reject incomplete or malformed provider batches before indexing/caching."""
+    from .vectorstores._validation import embedding_matrix
+
+    matrix = embedding_matrix(value, rows=rows)
+    return _normalize(matrix) if normalize else matrix
 
 
 class OpenAIEmbedding(EmbeddingModel):
@@ -67,9 +77,17 @@ class OpenAIEmbedding(EmbeddingModel):
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
         response = self.client.embeddings.create(model=self.model, input=texts)
-        data = sorted(response.data, key=lambda item: item.index)
-        vectors = np.asarray([item.embedding for item in data], dtype=np.float32)
-        return _normalize(vectors) if self.normalize else vectors
+        data = list(response.data)
+        indices = [getattr(item, "index", None) for item in data]
+        if (
+            any(type(index) is not int for index in indices)
+            or sorted(indices) != list(range(len(texts)))
+        ):
+            raise ValueError("Embedding response must contain each input index exactly once")
+        data.sort(key=lambda item: item.index)
+        return _provider_vectors(
+            [item.embedding for item in data], rows=len(texts), normalize=self.normalize,
+        )
 
     def embed_query(self, text: str) -> np.ndarray:
         return self.embed_documents([text])[0]
@@ -141,12 +159,11 @@ class CohereEmbedding(EmbeddingModel):
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
         response = self.client.embed(texts=texts, model=self.model, input_type="search_document")
-        return _normalize(np.asarray(response.embeddings, dtype=np.float32))
+        return _provider_vectors(response.embeddings, rows=len(texts))
 
     def embed_query(self, text: str) -> np.ndarray:
-        np = _numpy()
         response = self.client.embed(texts=[text], model=self.model, input_type="search_query")
-        return _normalize(np.asarray(response.embeddings[0], dtype=np.float32))
+        return _provider_vectors(response.embeddings, rows=1)[0]
 
     def get_fingerprint(self) -> str:
         return f"CohereEmbedding::{self.model}"
@@ -176,12 +193,11 @@ class VoyageEmbedding(EmbeddingModel):
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
         response = self.client.embed(texts, model=self.model, input_type="document")
-        return _normalize(np.asarray(response.embeddings, dtype=np.float32))
+        return _provider_vectors(response.embeddings, rows=len(texts))
 
     def embed_query(self, text: str) -> np.ndarray:
-        np = _numpy()
         response = self.client.embed([text], model=self.model, input_type="query")
-        return _normalize(np.asarray(response.embeddings[0], dtype=np.float32))
+        return _provider_vectors(response.embeddings, rows=1)[0]
 
     def get_fingerprint(self) -> str:
         return f"VoyageEmbedding::{self.model}"

@@ -6,12 +6,14 @@ conversation context, and stores assistant answers for subsequent turns.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import OrderedDict
 from copy import deepcopy
+from threading import RLock
 from time import time
 from typing import Any
 
 from ..engine import RAGEngine, RAGResponse
-from ..base import LLMClient, _validate_non_negative_int
+from ..base import LLMClient, _close_stream, _validate_non_negative_int, _validate_top_k
 
 
 @dataclass
@@ -33,29 +35,65 @@ class ConversationTurn:
 
 
 class InMemoryConversationStore:
-    """Simple per-session conversation store."""
+    """Bounded, thread-safe session memory with least-recently-used eviction.
 
-    def __init__(self):
-        self._sessions: dict[str, list[ConversationTurn]] = {}
+    Eviction removes the oldest inactive session; each session retains its most
+    recent ``max_turns_per_session`` exchanges. Use an external store when
+    conversations must survive process restarts or span multiple workers.
+    """
+
+    def __init__(self, *, max_sessions: int = 1024, max_turns_per_session: int = 100):
+        self.max_sessions = _validate_top_k(max_sessions, name="max_sessions")
+        self.max_turns_per_session = _validate_top_k(max_turns_per_session, name="max_turns_per_session")
+        self._sessions: OrderedDict[str, list[ConversationTurn]] = OrderedDict()
+        self._turn_counts: dict[str, int] = {}
+        self._lock = RLock()
 
     def append(self, session_id: str, turn: ConversationTurn) -> None:
-        self._sessions.setdefault(session_id, []).append(turn)
+        with self._lock:
+            turns = self._sessions.setdefault(session_id, [])
+            turns.append(deepcopy(turn))
+            self._turn_counts[session_id] = self._turn_counts.get(session_id, 0) + 1
+            del turns[:-self.max_turns_per_session]
+            self._sessions.move_to_end(session_id)
+            while len(self._sessions) > self.max_sessions:
+                evicted, _ = self._sessions.popitem(last=False)
+                self._turn_counts.pop(evicted, None)
+
+    def turn_count(self, session_id: str) -> int:
+        """Number of completed exchanges since session creation or eviction."""
+        with self._lock:
+            return self._turn_counts.get(session_id, 0)
+
+    def append_with_index(self, session_id: str, turn: ConversationTurn) -> int:
+        """Append an exchange and return its ordinal atomically."""
+        with self._lock:
+            self.append(session_id, turn)
+            return self._turn_counts[session_id]
 
     def get(self, session_id: str, limit: int | None = None) -> list[ConversationTurn]:
-        turns = list(self._sessions.get(session_id, []))
         if limit is not None:
             _validate_non_negative_int(limit, name="limit")
-            return deepcopy(turns[-limit:]) if limit else []
-        return deepcopy(turns)
+        with self._lock:
+            turns = self._sessions.get(session_id, [])
+            if session_id in self._sessions:
+                self._sessions.move_to_end(session_id)
+            if limit is not None:
+                return deepcopy(turns[-limit:]) if limit else []
+            return deepcopy(turns)
 
     def clear(self, session_id: str | None = None) -> None:
-        if session_id is None:
-            self._sessions.clear()
-        else:
-            self._sessions.pop(session_id, None)
+        with self._lock:
+            if session_id is None:
+                self._sessions.clear()
+                self._turn_counts.clear()
+            else:
+                self._sessions.pop(session_id, None)
+                self._turn_counts.pop(session_id, None)
 
     def to_dict(self) -> dict[str, list[dict[str, Any]]]:
-        return {session: [turn.to_dict() for turn in turns] for session, turns in self._sessions.items()}
+        with self._lock:
+            return deepcopy({session: [turn.to_dict() for turn in turns] for session, turns in self._sessions.items()})
 
 
 class ConversationalRAGEngine:
@@ -85,23 +123,23 @@ class ConversationalRAGEngine:
         history = self.memory.get(sid, limit=self.max_history_turns)
         standalone_query = self._standalone_query(query, history)
         response = self.engine.ask(standalone_query, **kwargs)
-        response.metadata.setdefault("conversation", {})
-        response.metadata["conversation"].update(
-            {
-                "session_id": sid,
-                "turn_index": len(self.memory.get(sid)) + 1,
-                "original_query": query,
-                "standalone_query": standalone_query,
-                "history_turns_used": len(history),
-            }
-        )
-        self.memory.append(
+        turn_index = self.memory.append_with_index(
             sid,
             ConversationTurn(
                 user=query,
                 assistant=response.answer,
                 metadata={"standalone_query": standalone_query, "source_count": len(response.sources)},
             ),
+        )
+        response.metadata.setdefault("conversation", {})
+        response.metadata["conversation"].update(
+            {
+                "session_id": sid,
+                "turn_index": turn_index,
+                "original_query": query,
+                "standalone_query": standalone_query,
+                "history_turns_used": len(history),
+            }
         )
         return response
 
@@ -115,9 +153,18 @@ class ConversationalRAGEngine:
         history = self.memory.get(sid, limit=self.max_history_turns)
         standalone_query = self._standalone_query(query, history)
         chunks: list[str] = []
-        for chunk in self.engine.stream(standalone_query, **kwargs):
-            chunks.append(str(chunk))
-            yield chunk
+        owner = self.engine.stream(standalone_query, **kwargs)
+        stream = None
+        try:
+            stream = iter(owner)
+            for chunk in stream:
+                chunks.append(str(chunk))
+                yield chunk
+        finally:
+            if stream is not None:
+                _close_stream(stream)
+            if owner is not stream:
+                _close_stream(owner)
         self.memory.append(sid, ConversationTurn(user=query, assistant="".join(chunks), metadata={"standalone_query": standalone_query}))
 
     def history(self, session_id: str | None = None, limit: int | None = None) -> list[ConversationTurn]:

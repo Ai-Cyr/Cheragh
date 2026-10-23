@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from copy import deepcopy
+from contextvars import ContextVar
 import inspect
 from typing import Any, Mapping
 
@@ -53,20 +54,36 @@ class FederatedRetriever(BaseRetriever):
         self.sources = dict(sources)
         self.top_k_per_source = _validate_top_k(top_k_per_source, name="top_k_per_source")
         self.continue_on_error = continue_on_error
-        self.last_results: list[FederatedSourceResult] = []
+        self._last_results: ContextVar[list[FederatedSourceResult] | None] = ContextVar(
+            "federated_source_results", default=None,
+        )
+
+    @property
+    def last_results(self) -> list[FederatedSourceResult]:
+        """Diagnostics for the current execution context, never another caller."""
+        results = self._last_results.get()
+        return results if results is not None else []
+
+    @last_results.setter
+    def last_results(self, results: list[FederatedSourceResult]) -> None:
+        self._last_results.set(results)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         top_k = _validate_top_k(top_k)
-        self.last_results = []
+        source_results: list[FederatedSourceResult] = []
+        self.last_results = source_results
         merged: dict[str, Document] = {}
         for source_name, source in self.sources.items():
             try:
                 result = deepcopy(_query_source(source_name, source, query, self.top_k_per_source))
             except Exception as exc:  # pragma: no cover - defensive branch
                 if not self.continue_on_error:
+                    self.last_results = source_results
                     raise
-                result = FederatedSourceResult(source_name=source_name, error=str(exc))
-            self.last_results.append(result)
+                # Provider errors can include credentials, request payloads or
+                # private paths. Public diagnostics expose only the error type.
+                result = FederatedSourceResult(source_name=source_name, error=type(exc).__name__)
+            source_results.append(result)
             qualified_documents: list[Document] = []
             for rank, doc in enumerate(result.documents):
                 original_doc_id = doc.doc_id
@@ -99,6 +116,7 @@ class FederatedRetriever(BaseRetriever):
                     score=1.0 / (self.rrf_k + 1) if self.fusion == "rrf" else 0.5,
                 )
         ordered = sorted(merged.values(), key=lambda doc: (doc.score is not None, doc.score or 0.0), reverse=True)
+        self.last_results = source_results
         return ordered[:top_k]
 
 
@@ -269,15 +287,29 @@ class FederatedRAGEngine:
         effective_top_k = self.top_k if top_k is None else _validate_top_k(top_k)
         step = trace.start_step("federated_retrieval", source_count=len(self.sources), top_k=effective_top_k) if trace else None
         docs = self.retriever.retrieve(query, top_k=effective_top_k)
+        # Capture this request's diagnostics before calling user generation
+        # code, which can itself perform another federated retrieval.
+        if isinstance(self.retriever, FederatedRetriever):
+            source_results = list(self.retriever.last_results)
+        else:
+            # Authorization wrappers replace this retriever. Never unwrap them
+            # to recover diagnostics: raw source answers and documents can
+            # contain evidence denied to this caller.
+            grouped: dict[str, FederatedSourceResult] = {}
+            for document in docs:
+                source_name = str(document.metadata.get("source_name", "retrieval"))
+                result = grouped.setdefault(source_name, FederatedSourceResult(source_name))
+                result.documents.append(deepcopy(document))
+            source_results = list(grouped.values())
         if trace:
-            trace.query_variants = [f"{result.source_name}:{query}" for result in self.retriever.last_results]
-            for result in self.retriever.last_results:
+            trace.query_variants = [f"{result.source_name}:{query}" for result in source_results]
+            for result in source_results:
                 trace.add_retrieval(f"{result.source_name}:{query}", result.documents)
         if step:
-            step.finish(document_count=len(docs), source_count=len(self.retriever.last_results))
+            step.finish(document_count=len(docs), source_count=len(source_results))
 
         context = AdvancedRAGPipeline._format_context(docs)
-        source_answers = [result for result in self.retriever.last_results if result.answer]
+        source_answers = [result for result in source_results if result.answer]
         if source_answers:
             rendered_answers = "\n".join(f"[{item.source_name}] {item.answer}" for item in source_answers)
             context = f"{context}\n\nRéponses intermédiaires par source:\n{rendered_answers}" if context else rendered_answers
@@ -293,7 +325,7 @@ class FederatedRAGEngine:
         validation = validate_citations(answer, docs, require_citations=False)
         warnings = validation.warnings + [
             f"source_error:{result.source_name}"
-            for result in self.retriever.last_results
+            for result in source_results
             if result.error
         ]
         if trace:
@@ -301,7 +333,7 @@ class FederatedRAGEngine:
             trace.finish(
                 answer_chars=len(answer),
                 prompt_chars=len(prompt),
-                source_count=len(self.retriever.last_results),
+                source_count=len(source_results),
             )
 
         response = RAGResponse(
@@ -313,8 +345,8 @@ class FederatedRAGEngine:
             metadata={
                 "architecture": "federated_rag",
                 "source_count": len(self.sources),
-                "sources_queried": [result.source_name for result in self.retriever.last_results],
-                "source_errors": {result.source_name: result.error for result in self.retriever.last_results if result.error},
+                "sources_queried": [result.source_name for result in source_results],
+                "source_errors": {result.source_name: result.error for result in source_results if result.error},
                 "top_k": effective_top_k,
             },
             citations=validation.citations,
@@ -324,7 +356,7 @@ class FederatedRAGEngine:
             citation_validation=validation,
             trace=trace,
         )
-        return FederatedRAGResult(response=response, source_results=list(self.retriever.last_results))
+        return FederatedRAGResult(response=response, source_results=source_results)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         return self.retriever.retrieve(query, top_k=top_k)

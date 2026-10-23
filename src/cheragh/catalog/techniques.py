@@ -243,7 +243,7 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
         TechniqueStatus.BETA,
         "cheragh.ConversationalRAGEngine",
         "Rewrite follow-up questions through an optional LLM using a bounded history window.",
-        limitations=("The in-memory store keeps all turns; applications must provide retention for long-lived sessions.",),
+        limitations=("The in-memory store evicts old sessions and turns; use an application store for durable or multi-worker history.",),
     ),
     _spec("sql-rag", "SQL RAG", TechniqueFamily.STRUCTURED, TechniqueStatus.BETA, "cheragh.SQLRAGEngine", "Generate and execute guarded read-only SQLite queries."),
     _spec(

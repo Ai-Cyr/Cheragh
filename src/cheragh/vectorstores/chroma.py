@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 from uuid import uuid4
 
-from ..base import BaseRetriever, Document, EmbeddingModel, _validate_top_k
+from ..base import BaseRetriever, Document, EmbeddingModel, _snapshot_documents, _validate_top_k
 from ..filters import metadata_matches
 from ._validation import embedding_matrix, query_vector
 
@@ -44,7 +44,9 @@ class ChromaVectorStore:
         self.collection = client.get_or_create_collection(collection_name)
 
     def add_documents(self, documents: Iterable[Document]) -> None:
-        docs = list(documents)
+        # Providers may block while callers reuse/mutate their Document objects.
+        # Keep vectors, content and authorization metadata in one owned snapshot.
+        docs = _snapshot_documents(documents)
         if not docs:
             return
         # Explicit document IDs retain Chroma's upsert semantics.  Anonymous

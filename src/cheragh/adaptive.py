@@ -148,7 +148,7 @@ class HeuristicComplexityClassifier:
     """
 
     _NO_RETRIEVAL_PATTERNS = (
-        r"^(bonjour|bonsoir|salut|merci|hello|hi)\b",
+        r"^(bonjour|bonsoir|salut|merci|hello|hi)[\s!.?]*$",
         r"^\s*\d+(?:\.\d+)?\s*[+*/-]\s*\d+(?:\.\d+)?\s*\??$",
         r"^(traduis|translate|reformule|rewrite)\b.+(?:ce texte|this text)",
     )

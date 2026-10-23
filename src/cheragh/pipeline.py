@@ -52,6 +52,13 @@ class AdvancedRAGPipeline:
         answer_prompt: str = DEFAULT_ANSWER_PROMPT_FR,
         top_k: int = 5,
     ):
+        from .engine import _validate_answer_prompt
+
+        if not callable(getattr(retriever, "retrieve", None)):
+            raise TypeError("retriever must expose retrieve(query, top_k)")
+        if not callable(getattr(llm_client, "generate", None)):
+            raise TypeError("llm_client must expose generate(prompt)")
+        _validate_answer_prompt(answer_prompt)
         self.retriever = retriever
         self.llm_client = llm_client
         self.answer_prompt = answer_prompt
@@ -59,10 +66,19 @@ class AdvancedRAGPipeline:
 
     def run(self, query: str) -> dict:
         """Exécute le pipeline et retourne la réponse + les sources."""
-        docs = self.retriever.retrieve(query, top_k=self.top_k)
+        from .engine import _validate_query, _validated_document_results
+
+        query = _validate_query(query)
+        docs = _validated_document_results(
+            self.retriever.retrieve(query, top_k=self.top_k),
+            limit=self.top_k,
+            name="retriever result",
+        )
         context = self._format_context(docs)
         prompt = self.answer_prompt.format(context=context, query=query)
         answer = self.llm_client.generate(prompt)
+        if not isinstance(answer, str):
+            raise TypeError("llm_client.generate() must return a str")
         return {
             "query": query,
             "answer": answer,

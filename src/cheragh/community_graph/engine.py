@@ -22,7 +22,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import math
 import re
-from typing import Any, Callable, Iterable, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
 from ..base import (
     Document,
@@ -37,6 +37,7 @@ from ..citations import validate_citations
 from ..graph.engine import KnowledgeGraph, KnowledgeTriple, build_knowledge_graph
 from ..pipeline import AdvancedRAGPipeline, DEFAULT_ANSWER_PROMPT_FR
 from ..schema import RAGResponse, Source
+from ..security.access_control import AccessPolicy, Principal
 from ..tracing import RAGTrace
 
 
@@ -368,7 +369,31 @@ class CommunityGraphRAGEngine:
 
         return [_snapshot_report(report) for report in self._reports]
 
-    def global_search(self, query: str, top_k: int = 5) -> list[Document]:
+    def _authorized_doc_ids(
+        self, allowed_doc_ids: Iterable[str] | None,
+        principal: Principal | Mapping[str, Any] | None, access_policy: AccessPolicy | None,
+    ) -> set[str] | None:
+        if allowed_doc_ids is None and principal is None and access_policy is None:
+            return None
+        allowed = set(self._documents_by_id)
+        if allowed_doc_ids is not None:
+            if isinstance(allowed_doc_ids, (str, bytes)):
+                raise TypeError("allowed_doc_ids must be an iterable of source IDs")
+            requested = list(allowed_doc_ids)
+            if any(not isinstance(item, str) or not item.strip() for item in requested):
+                raise ValueError("allowed_doc_ids must contain non-empty strings")
+            allowed.intersection_update(requested)
+        if principal is not None or access_policy is not None:
+            policy = access_policy if access_policy is not None else AccessPolicy()
+            allowed.intersection_update(
+                document.doc_id for document in self.documents if policy.authorize(document, principal).allowed
+            )
+        return allowed
+
+    def global_search(
+        self, query: str, top_k: int = 5, *, allowed_doc_ids: Iterable[str] | None = None,
+        principal: Principal | Mapping[str, Any] | None = None, access_policy: AccessPolicy | None = None,
+    ) -> list[Document]:
         """Rank community reports lexically and return at most ``top_k``.
 
         Returned document ids use ``community:<id>``.  Their metadata contains a
@@ -376,15 +401,26 @@ class CommunityGraphRAGEngine:
         """
 
         top_k = _validate_top_k(top_k)
+        allowed = self._authorized_doc_ids(allowed_doc_ids, principal, access_policy)
         ranked = self._rank_reports(query)
+        if allowed is not None:
+            ranked = [(report, score, terms) for report, score, terms in ranked
+                      if report.metadata.get("provenance_complete") is True and report.doc_ids
+                      and set(report.doc_ids) <= allowed]
         return [self._report_document(report, score, matched_terms) for report, score, matched_terms in ranked[:top_k]]
 
-    def local_search(self, query: str, top_k: int = 5) -> list[Document]:
+    def local_search(
+        self, query: str, top_k: int = 5, *, allowed_doc_ids: Iterable[str] | None = None,
+        principal: Principal | Mapping[str, Any] | None = None, access_policy: AccessPolicy | None = None,
+    ) -> list[Document]:
         """Retrieve source documents through matched entities and communities."""
 
         top_k = _validate_top_k(top_k)
+        allowed = self._authorized_doc_ids(allowed_doc_ids, principal, access_policy)
         if self._semantic_local is not None:
-            return self._semantic_local.retrieve(query, top_k=top_k)
+            return self._semantic_local._evidence(
+                query, top_k, set(self._documents_by_id) if allowed is None else allowed,
+            )[0]
         entity_scores = self._match_entities(query)
         report_scores = {report.community_id: score for report, score, _ in self._rank_reports(query)}
         doc_scores: dict[str, float] = defaultdict(float)
@@ -415,7 +451,8 @@ class CommunityGraphRAGEngine:
                     doc_scores[doc_id] = max(doc_scores[doc_id], base_score * 0.5)
                     doc_communities[doc_id].add(report.community_id)
 
-        ordered_ids = sorted(doc_scores, key=lambda doc_id: (-doc_scores[doc_id], doc_id))[:top_k]
+        eligible_ids = (doc_id for doc_id in doc_scores if allowed is None or doc_id in allowed)
+        ordered_ids = sorted(eligible_ids, key=lambda doc_id: (-doc_scores[doc_id], doc_id))[:top_k]
         results: list[Document] = []
         for doc_id in ordered_ids:
             document = _snapshot_document(self._documents_by_id[doc_id])
@@ -428,21 +465,35 @@ class CommunityGraphRAGEngine:
                     "source_doc_id": doc_id,
                 }
             )
+            if allowed is not None:
+                # Communities can span authorization boundaries. Do not expose
+                # derived graph annotations alongside an authorized source.
+                document.metadata.pop("community_ids", None)
+                document.metadata.pop("matched_entities", None)
             results.append(document)
         return results
 
-    def search(self, query: str, top_k: int = 5, *, mode: str = "global") -> list[Document]:
+    def search(self, query: str, top_k: int = 5, *, mode: str = "global",
+               allowed_doc_ids: Iterable[str] | None = None,
+               principal: Principal | Mapping[str, Any] | None = None,
+               access_policy: AccessPolicy | None = None) -> list[Document]:
         """Search report documents globally or source documents locally."""
 
         normalized_mode = _validate_mode(mode)
         if normalized_mode == "global":
-            return self.global_search(query, top_k=top_k)
-        return self.local_search(query, top_k=top_k)
+            return self.global_search(query, top_k=top_k, allowed_doc_ids=allowed_doc_ids,
+                                      principal=principal, access_policy=access_policy)
+        return self.local_search(query, top_k=top_k, allowed_doc_ids=allowed_doc_ids,
+                                 principal=principal, access_policy=access_policy)
 
-    def retrieve(self, query: str, top_k: int = 5, *, mode: str = "global") -> list[Document]:
+    def retrieve(self, query: str, top_k: int = 5, *, mode: str = "global",
+                 allowed_doc_ids: Iterable[str] | None = None,
+                 principal: Principal | Mapping[str, Any] | None = None,
+                 access_policy: AccessPolicy | None = None) -> list[Document]:
         """Retriever-compatible alias for :meth:`search`."""
 
-        return self.search(query, top_k=top_k, mode=mode)
+        return self.search(query, top_k=top_k, mode=mode, allowed_doc_ids=allowed_doc_ids,
+                           principal=principal, access_policy=access_policy)
 
     def ask(
         self,
@@ -450,6 +501,9 @@ class CommunityGraphRAGEngine:
         top_k: int | None = None,
         *,
         mode: str = "global",
+        allowed_doc_ids: Iterable[str] | None = None,
+        principal: Principal | Mapping[str, Any] | None = None,
+        access_policy: AccessPolicy | None = None,
         **generate_kwargs: Any,
     ) -> RAGResponse:
         """Answer from ranked reports (global) or entity evidence (local)."""
@@ -457,8 +511,11 @@ class CommunityGraphRAGEngine:
         normalized_mode = _validate_mode(mode)
         effective_top_k = self.top_k if top_k is None else _validate_top_k(top_k)
         if normalized_mode == "local" and self._semantic_local is not None:
-            return self._semantic_local.ask(query, top_k=effective_top_k, **generate_kwargs)
-        documents = self.search(query, top_k=effective_top_k, mode=normalized_mode)
+            return self._semantic_local.ask(query, top_k=effective_top_k, allowed_doc_ids=allowed_doc_ids,
+                                            principal=principal, access_policy=access_policy, **generate_kwargs)
+        scoped = allowed_doc_ids is not None or principal is not None or access_policy is not None
+        documents = self.search(query, top_k=effective_top_k, mode=normalized_mode,
+                                allowed_doc_ids=allowed_doc_ids, principal=principal, access_policy=access_policy)
         trace = RAGTrace(query=query) if self.trace_enabled else None
         if trace:
             retrieval_step = trace.start_step(
@@ -476,7 +533,8 @@ class CommunityGraphRAGEngine:
             generation_step = trace.start_step("community_graph_generation", document_count=len(documents))
         else:
             generation_step = None
-        answer = self.llm_client.generate(prompt, **generate_kwargs)
+        answer = ("Je ne sais pas : les sources autorisées ne fournissent pas de preuves suffisantes."
+                  if scoped and not documents else self.llm_client.generate(prompt, **generate_kwargs))
         if generation_step:
             generation_step.finish(answer_chars=len(answer))
         if trace:
@@ -509,7 +567,7 @@ class CommunityGraphRAGEngine:
                 "architecture": self._architecture,
                 "mode": normalized_mode,
                 "top_k": effective_top_k,
-                "community_count": len(self._communities),
+                "community_count": len(selected_communities) if scoped else len(self._communities),
                 "selected_communities": selected_communities,
                 "limitations": [
                     *(["single_level_deterministic_partition_not_hierarchical_leiden"]

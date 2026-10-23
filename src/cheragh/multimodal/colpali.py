@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from copy import deepcopy
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from ..base import BaseRetriever, Document, _numpy, _validate_top_k
@@ -216,6 +217,7 @@ class ColPaliRetriever(BaseRetriever):
         self.pages: list[MultimodalDocument] = []
         self.page_embeddings: list[Any] = []
         self.dimension: int | None = None
+        self._lock = RLock()
         self.add_pages(pages)
 
     def add_pages(self, pages: Iterable[MultimodalDocument]) -> None:
@@ -232,7 +234,7 @@ class ColPaliRetriever(BaseRetriever):
             raw_embeddings.extend(encoded)
         if len(raw_embeddings) != len(snapshots):
             raise ValueError("Visual encoder must return one embedding matrix per page")
-        expected_dimension = self.dimension
+        expected_dimension = None
         matrices: list[Any] = []
         for value in raw_embeddings:
             matrix = self._validated_matrix(
@@ -242,9 +244,12 @@ class ColPaliRetriever(BaseRetriever):
             )
             expected_dimension = int(matrix.shape[1])
             matrices.append(matrix)
-        self.dimension = expected_dimension
-        self.pages.extend(snapshots)
-        self.page_embeddings.extend(matrices)
+        with self._lock:
+            if self.dimension is not None and expected_dimension != self.dimension:
+                raise ValueError(f"ColPali page embedding dimension {expected_dimension} does not match {self.dimension}")
+            self.dimension = expected_dimension
+            self.pages.extend(snapshots)
+            self.page_embeddings.extend(matrices)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
         return list(self.retrieve_pages(query, top_k=top_k))
@@ -260,7 +265,11 @@ class ColPaliRetriever(BaseRetriever):
         top_k = _validate_top_k(top_k)
         if not isinstance(query, str) or not query.strip():
             raise ValueError("ColPali retrieval requires a non-empty text query")
-        if not self.pages:
+        with self._lock:
+            pages = list(self.pages)
+            page_embeddings = list(self.page_embeddings)
+            dimension = self.dimension
+        if not pages:
             return []
         raw_queries = list(self.encoder.embed_queries([query]))
         if len(raw_queries) != 1:
@@ -268,18 +277,18 @@ class ColPaliRetriever(BaseRetriever):
         query_matrix = self._validated_matrix(
             raw_queries[0],
             kind="query",
-            expected_dimension=self.dimension,
+            expected_dimension=dimension,
         )
 
         ranked: list[tuple[float, int, Any, Any]] = []
-        candidates = [index for index, page in enumerate(self.pages) if metadata_matches(page.metadata, filters)]
+        candidates = [index for index, page in enumerate(pages) if metadata_matches(page.metadata, filters)]
         for start in range(0, len(candidates), self.score_batch_size):
             indices = candidates[start : start + self.score_batch_size]
-            width = max(len(self.page_embeddings[index]) for index in indices)
+            width = max(len(page_embeddings[index]) for index in indices)
             padded = np.zeros((len(indices), width, query_matrix.shape[1]), dtype=query_matrix.dtype)
             valid = np.zeros((len(indices), width), dtype=bool)
             for offset, index in enumerate(indices):
-                rows = self.page_embeddings[index]
+                rows = page_embeddings[index]
                 padded[offset, :len(rows)] = rows
                 valid[offset, :len(rows)] = True
             similarities = np.einsum("qd,bpd->bqp", query_matrix, padded)
@@ -291,11 +300,11 @@ class ColPaliRetriever(BaseRetriever):
                 if self.normalize_by_query_tokens:
                     score /= max(1, query_matrix.shape[0])
                 ranked.append((score, index, patch_indices, token_scores))
-        ranked.sort(key=lambda item: (-item[0], self.pages[item[1]].doc_id or "", item[1]))
+        ranked.sort(key=lambda item: (-item[0], pages[item[1]].doc_id or "", item[1]))
 
         results: list[MultimodalDocument] = []
         for score, index, patch_indices, token_scores in ranked[:top_k]:
-            source = self.pages[index]
+            source = pages[index]
             metadata = {
                 **deepcopy(source.metadata),
                 "modality": source.modality.value,

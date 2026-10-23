@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 from uuid import uuid4
 
-from ..base import BaseRetriever, Document, EmbeddingModel, _validate_top_k
+from ..base import BaseRetriever, Document, EmbeddingModel, _snapshot_documents, _validate_top_k
 from ..filters import metadata_matches
 from ._validation import embedding_matrix, query_vector
 
@@ -50,7 +50,9 @@ class QdrantVectorStore:
     def add_documents(self, documents: Iterable[Document]) -> None:
         _, models = require_qdrant_client()
         self._models = models
-        docs = list(documents)
+        # Keep content and authorization metadata paired with the exact input
+        # embedded, even if the caller changes its objects during a network call.
+        docs = _snapshot_documents(documents)
         if not docs:
             return
         vectors = embedding_matrix(

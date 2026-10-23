@@ -15,6 +15,7 @@ C'est un "filtre LLM" placé entre le retriever et le générateur.
 from __future__ import annotations
 
 from copy import deepcopy
+from itertools import islice
 import re
 from typing import List
 
@@ -86,7 +87,7 @@ class ContextualCompressionRetriever(BaseRetriever):
         retrieved = self.base_retriever.retrieve(query, top_k=top_k * 2)
 
         compressed_docs: List[Document] = []
-        for doc in retrieved:
+        for doc in islice(retrieved, top_k * 2):
             prompt = COMPRESSION_PROMPT_FR.format(query=query, document=doc.content)
             compressed_content = self.llm_client.generate(prompt).strip()
 

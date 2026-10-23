@@ -15,6 +15,7 @@ that a model's plan is correct.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import islice
 import json
 import re
 from typing import Any, Callable, Iterable, Protocol, Sequence
@@ -99,6 +100,8 @@ class ToolRegistry:
 
     def execute(self, name: str, tool_input: str) -> ToolObservation:
         """Execute only an exact, registered name; failures become observations."""
+        if not isinstance(name, str):
+            return ToolObservation("", False, error="tool_name_must_be_text")
         tool = self._tools.get(name)
         if tool is None:
             return ToolObservation(name, False, error="tool_not_registered")
@@ -123,8 +126,10 @@ class AgentAction:
     reason: str = ""
 
     def __post_init__(self) -> None:
-        if self.kind not in {"tool", "final"}:
+        if not isinstance(self.kind, str) or self.kind not in {"tool", "final"}:
             raise ValueError("action kind must be 'tool' or 'final'")
+        if self.tool_name is not None and not isinstance(self.tool_name, str):
+            raise TypeError("tool_name must be a string or None")
         if self.kind == "tool" and not self.tool_name:
             raise ValueError("tool actions require tool_name")
         if self.kind == "final" and self.tool_name is not None:
@@ -195,13 +200,16 @@ class AgentPlanner(Protocol):
 
 
 class ScriptedPlanner:
-    """Deterministic ordered planner for tests, demos, and fixed workflows."""
+    """Deterministic ordered planner for tests, demos, and fixed workflows.
+
+    Progress belongs to the supplied run history, so one planner can be reused
+    across independent and concurrent requests.
+    """
 
     def __init__(self, actions: Iterable[AgentAction], *, exhausted_answer: str = ""):
         self._actions = tuple(actions)
         if not self._actions:
             raise ValueError("actions must not be empty")
-        self._index = 0
         self.exhausted_answer = exhausted_answer
 
     def plan(
@@ -210,12 +218,11 @@ class ScriptedPlanner:
         steps: Sequence[AgentStep],
         tools: Sequence[ToolSpec],
     ) -> AgentAction:
-        del query, steps, tools
-        if self._index >= len(self._actions):
+        del query, tools
+        index = len(steps)
+        if index >= len(self._actions):
             return AgentAction.finish(self.exhausted_answer, reason="script_exhausted")
-        action = self._actions[self._index]
-        self._index += 1
-        return action
+        return self._actions[index]
 
 
 class LLMJSONPlanner:
@@ -271,10 +278,12 @@ class RetrievalToolAdapter:
         self.max_document_chars = max_document_chars
 
     def __call__(self, query: str) -> dict[str, Any]:
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
         normalized_query = " ".join(query.split())
         if not normalized_query:
             raise ValueError("retrieval query must not be empty")
-        documents = list(self.retriever.retrieve(normalized_query, top_k=self.top_k))
+        documents = list(islice(self.retriever.retrieve(normalized_query, top_k=self.top_k), self.top_k))
         if not all(isinstance(document, Document) for document in documents):
             raise TypeError("retriever.retrieve() must return Document objects")
         return {
@@ -360,6 +369,8 @@ class AgenticRAGEngine:
         self.planner_error_answer = planner_error_answer
 
     def ask(self, query: str) -> AgenticRAGResult:
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
         query = " ".join(query.split())
         if not query:
             raise ValueError("query must not be empty")
