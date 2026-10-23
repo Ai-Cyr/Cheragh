@@ -49,13 +49,17 @@ jobs:
         run: mypy --no-incremental
 
   test:
-    name: tests (Python ${{ matrix.python-version }})
+    name: installed wheel (Python ${{ matrix.python-version }}, ${{ matrix.dependencies }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        dependencies: [current]
+        include:
+          - python-version: "3.10"
+            dependencies: minimum
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,18 +71,24 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Install package and test tools
+      - name: Build and install wheel with test tools
         run: |
-          python -m pip install "pip==26.2.1"
-          python -m pip install -e ".[dev,fastapi]"
+          python -m pip install "pip==26.2.1" "build==1.5.0"
+          python -m build --wheel
+          wheel="$(python -c 'from pathlib import Path; print(next(Path("dist").glob("*.whl")).resolve())')"
+          if [ "${{ matrix.dependencies }}" = "minimum" ]; then
+            python -m pip install "${wheel}[dev]" "numpy==1.24.0" "pydantic==2.4.0"
+          else
+            python -m pip install "${wheel}[dev,fastapi]"
+          fi
           python -m pip check
-      - name: Run tests
-        run: pytest --cov=cheragh --cov-report=term-missing
+      - name: Run full suite against installed wheel
+        run: python -I scripts/test_distribution.py . --cov=cheragh --cov-report=term-missing
 
   package:
     name: package artifacts
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -111,8 +121,10 @@ jobs:
           sdist-smoke/bin/python -I scripts/smoke_distribution.py
           sdist_dir="$(mktemp -d)"
           tar --extract --gzip --file dist/*.tar.gz --strip-components=1 --directory "$sdist_dir"
-          sdist-smoke/bin/python -I -m unittest discover \
-            --start-directory "$sdist_dir/tests" --pattern test_production_delivery.py
+          sdist="$(python -c 'from pathlib import Path; print(next(Path("dist").glob("*.tar.gz")).resolve())')"
+          sdist-smoke/bin/python -m pip install "${sdist}[dev,fastapi]"
+          sdist-smoke/bin/python -m pip check
+          sdist-smoke/bin/python -I "$sdist_dir/scripts/test_distribution.py" "$sdist_dir" -q
       - name: Preserve validated distributions
         run: |
           python - <<'PY'
@@ -313,9 +325,12 @@ jobs:
         run: |
           python -m pip install "pip==26.2.1" "pip-audit==2.10.1"
           python -m pip_audit --strict --progress-spinner=off .
+          python -m pip wheel --no-deps --wheel-dir server-wheels .
           python -m venv server-audit
           server-audit/bin/python -m pip install "pip==26.2.1"
-          server-audit/bin/python -m pip install --constraint docker/constraints.txt ".[fastapi,config]"
+          server-audit/bin/python -m pip install --require-hashes --only-binary=:all: -r docker/server-requirements.txt
+          wheel="$(python -c 'from pathlib import Path; print(next(Path("server-wheels").glob("*.whl")).resolve())')"
+          server-audit/bin/python -m pip install --no-index --constraint docker/constraints.txt "${wheel}[fastapi,config]"
           server-audit/bin/python -m pip check
           server-audit/bin/python -m pip freeze --exclude cheragh > server-requirements.txt
           python -m pip_audit --strict --progress-spinner=off \

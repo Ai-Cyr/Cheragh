@@ -9,6 +9,8 @@ from typing import Any
 
 
 _ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+_MAX_CONFIG_DEPTH = 64
+_MAX_CONFIG_NODES = 100_000
 
 
 def load_raw_config(path: str | Path) -> dict[str, Any]:
@@ -23,7 +25,14 @@ def load_raw_config(path: str | Path) -> dict[str, Any]:
             import yaml  # type: ignore
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise ImportError("YAML config requires PyYAML. Install with: pip install cheragh[config]") from exc
-        data = yaml.safe_load(text) or {}
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            # Parser errors can quote the input line, including literal API
+            # keys. Keep the location useful without logging configuration.
+            mark = getattr(exc, "problem_mark", None)
+            location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+            raise ValueError(f"Invalid YAML config{location}") from None
     if not isinstance(data, dict):
         raise ValueError("Config root must be a mapping")
     return data
@@ -53,25 +62,41 @@ def _resolve_environment_references(value: Any, *, location: str = "config") -> 
     their secret manager through the process environment.
     """
 
-    if isinstance(value, dict):
-        return {
-            key: _resolve_environment_references(item, location=f"{location}.{key}")
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [
-            _resolve_environment_references(item, location=f"{location}[{index}]")
-            for index, item in enumerate(value)
-        ]
-    if not isinstance(value, str):
-        return value
-    match = _ENV_REFERENCE.fullmatch(value)
-    if match is None:
-        return value
-    variable = match.group(1)
-    resolved = os.environ.get(variable)
-    if resolved is None or not resolved.strip():
-        raise ValueError(
-            f"Environment variable {variable!r} referenced by {location} is not set or is empty"
-        )
-    return resolved
+    active: set[int] = set()
+    remaining = _MAX_CONFIG_NODES
+
+    def resolve(item: Any, path: str, depth: int) -> Any:
+        nonlocal remaining
+        remaining -= 1
+        if remaining < 0:
+            raise ValueError(f"Config exceeds {_MAX_CONFIG_NODES} expanded values")
+        if depth > _MAX_CONFIG_DEPTH:
+            raise ValueError(f"Config exceeds {_MAX_CONFIG_DEPTH} nesting levels")
+        if isinstance(item, (dict, list)):
+            identity = id(item)
+            if identity in active:
+                raise ValueError(f"Config contains a cyclic reference at {path}")
+            active.add(identity)
+            try:
+                if isinstance(item, dict):
+                    return {
+                        key: resolve(child, f"{path}.{key}", depth + 1)
+                        for key, child in item.items()
+                    }
+                return [resolve(child, f"{path}[{index}]", depth + 1) for index, child in enumerate(item)]
+            finally:
+                active.remove(identity)
+        if not isinstance(item, str):
+            return item
+        match = _ENV_REFERENCE.fullmatch(item)
+        if match is None:
+            return item
+        variable = match.group(1)
+        resolved = os.environ.get(variable)
+        if resolved is None or not resolved.strip():
+            raise ValueError(
+                f"Environment variable {variable!r} referenced by {path} is not set or is empty"
+            )
+        return resolved
+
+    return resolve(value, location, 0)

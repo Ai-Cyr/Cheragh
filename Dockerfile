@@ -41,15 +41,26 @@ ENV CHERAGH_ENABLE_INDEXING=false \
 WORKDIR /app
 
 COPY docker/constraints.txt /app/docker/constraints.txt
+COPY docker/server-requirements.txt /app/docker/server-requirements.txt
 COPY --from=builder /wheels /tmp/wheels
 
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/python -m pip install "pip==${PIP_VERSION}" \
     && wheel="$(find /tmp/wheels -maxdepth 1 -type f -name 'cheragh-*.whl' -print -quit)" \
     && test -n "${wheel}" \
-    && /opt/venv/bin/python -m pip install \
-        --constraint /app/docker/constraints.txt \
-        "${wheel}[${CHERAGH_EXTRAS}]" \
+    && if [ "${CHERAGH_EXTRAS}" = "fastapi,config" ] \
+          || [ "${CHERAGH_EXTRAS}" = "config,fastapi" ]; then \
+        /opt/venv/bin/python -m pip install \
+            --require-hashes --only-binary=:all: \
+            --requirement /app/docker/server-requirements.txt \
+        && /opt/venv/bin/python -m pip install \
+            --no-index --constraint /app/docker/constraints.txt \
+            "${wheel}[${CHERAGH_EXTRAS}]"; \
+    else \
+        /opt/venv/bin/python -m pip install \
+            --constraint /app/docker/constraints.txt \
+            "${wheel}[${CHERAGH_EXTRAS}]"; \
+    fi \
     && /opt/venv/bin/python -m pip check \
     && rm -rf /tmp/wheels \
     && addgroup --system --gid 10001 cheragh \

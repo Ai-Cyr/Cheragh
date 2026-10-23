@@ -7,13 +7,16 @@ from typing import Any, Literal
 try:
     from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 except ImportError as exc:  # pragma: no cover - dependency guard
-    raise ImportError("Config validation requires pydantic>=2. Install with: pip install cheragh[config]") from exc
+    raise ImportError("Config validation requires pydantic>=2.4. Install with: pip install cheragh[config]") from exc
 
 
 class StrictBaseModel(BaseModel):
     # Validation exceptions are routinely written to CLI/startup logs. A model
     # validator can otherwise include the entire input mapping with API keys.
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True, hide_input_in_errors=True)
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, strict=True,
+        hide_input_in_errors=True, allow_inf_nan=False,
+    )
 
 
 _RETRIEVER_TYPES = {"bm25", "hybrid", "memory", "vector", "faiss", "chroma", "qdrant"}
@@ -408,7 +411,12 @@ class RAGConfig(StrictBaseModel):
         if not isinstance(data, dict):
             return data
         data = dict(data)
-        cache = dict(data.get("cache") or {})
+        raw_cache = data.get("cache", {})
+        if not isinstance(raw_cache, dict):
+            # Preserve invalid input for Pydantic's typed, redacted diagnostic;
+            # dict() would coerce list pairs or raise an uncaught TypeError.
+            return data
+        cache = dict(raw_cache)
         if data.get("cache_backend") is not None and "backend" not in cache:
             cache["enabled"] = True
             cache["backend"] = data.get("cache_backend")
@@ -425,11 +433,12 @@ class RAGConfig(StrictBaseModel):
         retriever_type = self.retriever.type
         vector_type = self.vectorstore.type
         retriever_type_was_explicit = "type" in self.retriever.model_fields_set
-        vector_type_was_explicit = "type" in self.vectorstore.model_fields_set and vector_type is not None
+        vector_type_was_explicit = "type" in self.vectorstore.model_fields_set
         aliases = {"vector": "memory"}
         if (
             retriever_type_was_explicit
             and vector_type_was_explicit
+            and vector_type is not None
             and aliases.get(retriever_type, retriever_type) != aliases.get(vector_type, vector_type)
         ):
             raise ValueError(

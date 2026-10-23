@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Run the full Python 3.10–3.13 test matrix against installed wheels and validate the shipped test suite against the source distribution without importing checkout sources.
+- Lock every dependency of the default Python 3.12 server image with hashes; verify the built wheel's extras against that lock before accepting the image.
+- Reject invalid YAML roots, cyclic or excessively expanded configuration aliases, non-finite numeric settings and malformed legacy cache configuration with bounded, redacted diagnostics.
+- Require Pydantic 2.4 or newer for the CLI's redacted validation API and continuously test the core package's minimum NumPy/Pydantic versions on Python 3.10.
+
 - Enforce source authorization across GraphRAG, Community GraphRAG and legacy RAPTOR, including derived reports, request-local retrievers and mutable metadata boundaries.
 - Keep learned and multimodal index documents aligned with embeddings during concurrent ingestion; validate provider embedding identities and finite vectors before publication.
 - Bound custom retriever/generator consumption in Self-RAG, Temporal RAG, MMR, compression, workflows and hard-negative mining; reject invalid critic attribution and scores.
