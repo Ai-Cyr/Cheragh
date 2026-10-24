@@ -27,7 +27,7 @@ class ChunkedLLM(StaticLLMClient):
 
 class V101ConfigAndStreamTests(unittest.TestCase):
     def test_production_preset_tokenizer_is_valid(self):
-        config = load_config("examples/presets/production_v100.yaml")
+        config = load_config(Path(__file__).resolve().parents[1] / "examples/presets/production_v100.yaml")
         self.assertTrue(config["retriever"]["tokenizer"]["strip_accents"])
 
     def test_invalid_vectorstore_is_rejected(self):

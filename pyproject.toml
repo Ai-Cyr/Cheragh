@@ -23,7 +23,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Typing :: Typed",
 ]
-dependencies = ["numpy>=1.24,<3", "pydantic>=2,<3"]
+dependencies = ["numpy>=1.24,<3", "pydantic>=2.4,<3"]
 
 [project.urls]
 Homepage = "https://github.com/Ai-Cyr/Cheragh"
@@ -50,13 +50,13 @@ graphrag = ["graspologic>=3.4,<4"]
 training = ["torch>=2.2,<3"]
 training-generative = ["torch>=2.6,<3", "transformers>=4.46,<6", "sentencepiece>=0.2,<1"]
 bm25 = ["rank-bm25>=0.2.2,<1"]
-config = ["PyYAML>=6.0,<7", "pydantic>=2,<3"]
+config = ["PyYAML>=6.0,<7", "pydantic>=2.4,<3"]
 pdf = ["pypdf>=4.0,<7"]
 docx = ["python-docx>=1.0,<2"]
 faiss = ["faiss-cpu>=1.7,<2"]
 chroma = ["chromadb>=0.5,<2"]
 qdrant = ["qdrant-client>=1.9,<2"]
-fastapi = ["fastapi>=0.110,<1", "uvicorn>=0.29,<1", "pydantic>=2,<3"]
+fastapi = ["fastapi>=0.110,<1", "uvicorn>=0.29,<1", "pydantic>=2.4,<3"]
 redis = ["redis>=5.0,<9"]
 dev = [
   "pytest>=7,<10",
@@ -81,7 +81,7 @@ all = [
   "umap-learn>=0.5,<0.6",
   "rank-bm25>=0.2.2,<1",
   "PyYAML>=6.0,<7",
-  "pydantic>=2,<3",
+  "pydantic>=2.4,<3",
   "pypdf>=4.0,<7",
   "python-docx>=1.0,<2",
   "faiss-cpu>=1.7,<2",

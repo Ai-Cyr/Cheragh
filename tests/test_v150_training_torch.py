@@ -7,6 +7,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+import cheragh
 from cheragh import Document
 from cheragh.training.data import RetrievalTrainingExample, RetrievalTrainingPipeline, TeacherScoreDistiller
 from cheragh.training.torch_trainer import TorchRetrievalTrainer
@@ -19,7 +20,7 @@ except ImportError:
 
 class OptionalTorchImportTests(unittest.TestCase):
     def test_importing_training_does_not_require_or_import_torch(self):
-        source = str(Path(__file__).resolve().parents[1] / "src")
+        source = str(Path(cheragh.__file__).resolve().parents[1])
         code = (
             "import sys\n"
             f"sys.path.insert(0, {source!r})\n"

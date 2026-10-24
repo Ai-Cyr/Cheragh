@@ -43,6 +43,14 @@ timeouts des transports restent nécessaires pour les fournisseurs synchrones.
 
 ## Profils vérifiés et migration des intégrations
 
+Les fichiers YAML doivent contenir une table à la racine. Utilisez `{}` pour
+demander explicitement les valeurs par défaut : un fichier vide, `null`,
+`false` ou une liste sont désormais refusés. Le chargement rejette les alias
+cycliques et limite l'expansion à 64 niveaux et 100 000 valeurs. Les réglages
+numériques typés refusent `NaN` et les infinis, et la section `cache` doit être
+une table. Les erreurs de syntaxe YAML indiquent leur position sans afficher
+la ligne contenant potentiellement un secret.
+
 L'extra `anthropic` accepte les SDK 0.x et 1.x. Le SDK 1.x utilise `httpx2` :
 si l'application fournit `http_client`, `timeout`, `base_url` ou un transport
 HTTP sous forme d'objet, ces objets doivent appartenir à `httpx2` avec le SDK
@@ -56,6 +64,11 @@ une valeur explicitement fournie dans `extra_body` prend priorité ; les autres
 champs sont conservés et le dictionnaire de l'appelant n'est pas modifié.
 
 Le noyau et le serveur sont testés sous Python 3.10 à 3.13. La CI vérifie aussi
+les bornes minimales du noyau, NumPy 1.24.0 et Pydantic 2.4.0, sur Python 3.10.
+Pydantic 2.0 à 2.3 ne fournissent pas l'API de diagnostic masqué utilisée par
+la CLI et ne sont plus acceptés. Les versions minimales sont un contrôle de
+compatibilité ; utilisez les dépendances auditées du profil de déploiement.
+La CI vérifie également
 les vrais SDK FAISS, Chroma et Qdrant avec stockage local, ainsi que la
 sérialisation des requêtes Anthropic avec un transport HTTP simulé. Ces contrôles
 n'exigent ni clé de fournisseur ni service distant. Le fonctionnement d'un
@@ -244,6 +257,19 @@ La source distribution contient aussi les tests, scripts de vérification,
 workflows, Dockerfile et guides nécessaires pour reproduire ces contrôles sans
 checkout Git. La wheel ne contient que le paquet et ses métadonnées.
 
+La matrice Python 3.10 à 3.13 exécute toute la suite sur la wheel installée.
+Le contrôle utilise un répertoire temporaire, désactive l'ajout de `src` par
+pytest et vérifie que les modules Cheragh chargés proviennent de
+`site-packages`. La source distribution passe aussi cette suite après
+installation et extraction dans un environnement séparé. Pour reproduire ce
+contrôle sur une wheel construite localement :
+
+```bash
+wheel="$(python -c 'from pathlib import Path; print(next(Path("dist").glob("*.whl")).resolve())')"
+python -m pip install "${wheel}[dev,fastapi]"
+python -I scripts/test_distribution.py . -q
+```
+
 ### Compatibilité Sentence Transformers
 
 Les extras `local`, `rerank`, `learned-retrieval`, `multimodal` et `all`
@@ -323,13 +349,19 @@ docker build \
   --tag registry.example/cheragh:1.4.0 .
 ```
 
-Le build accepte aussi `CHERAGH_EXTRAS`; la valeur par défaut est
-`fastapi,config`. Gardez uniquement les intégrations nécessaires. Les versions
-directes utilisées par l'image sont contraintes dans `docker/constraints.txt`.
-Pour une reproductibilité complète, générez un lockfile à hashes pour la
-plateforme cible, installez-le explicitement avec `--require-hashes`, puis
-installez la wheel validée avec `--no-deps`. Remplacer un fichier passé à
-`--constraint` ne suffit pas à activer la vérification des hashes.
+Le profil par défaut `fastapi,config` installe ses dépendances directes et
+transitives depuis `docker/server-requirements.txt`, avec vérification des
+hashes par `--require-hashes`. La wheel locale est ensuite installée sans accès
+à l'index de paquets, en vérifiant la compatibilité de ses extras avec le verrou.
+Ce verrou est généré pour Linux x86-64 et Python 3.12 ;
+sa commande de régénération est indiquée dans le fichier. Toute mise à jour
+doit repasser l'audit et le test HTTP du conteneur.
+
+Le build accepte aussi `CHERAGH_EXTRAS`. Un profil personnalisé utilise les
+contraintes de `docker/constraints.txt` et nécessite son propre verrou avant
+déploiement. Gardez uniquement les intégrations nécessaires. Pour ce profil,
+générez un lockfile à hashes pour la plateforme cible, installez-le avec
+`--require-hashes`, puis installez la wheel validée avec `--no-deps`.
 
 La CI démarre aussi l'image avec un index local de test, un filesystem en lecture
 seule et les restrictions du profil de production. Elle vérifie `/ready`,

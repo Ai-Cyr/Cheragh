@@ -253,6 +253,11 @@ La [matrice de qualification production](docs/architecture_production_matrix.md)
 
 ## Sécurité et production
 
+La CI teste la wheel installée sur Python 3.10 à 3.13, ainsi que la source
+distribution. Le profil Docker par défaut utilise un verrou des dépendances
+avec vérification des hashes. Les commandes de validation et les limites de
+déploiement sont détaillées dans le [guide de production](docs/production.md).
+
 - ACL et isolation tenant/collection peuvent fonctionner en mode fail-closed ;
 - le chargement du cache historique `pickle` est désactivé par défaut ;
 - les prompts sont exclus des traces par défaut ;

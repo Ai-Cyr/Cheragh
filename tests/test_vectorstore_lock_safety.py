@@ -9,6 +9,7 @@ import sys
 
 import pytest
 
+import cheragh
 from cheragh import Document, HashingEmbedding
 from cheragh.vectorstores.memory import MemoryVectorStore, _store_file_lock
 
@@ -139,8 +140,9 @@ except TimeoutError:
     print('blocked')
 """
     environment = dict(os.environ)
-    source = str(Path(__file__).resolve().parents[1] / "src")
-    environment["PYTHONPATH"] = source + os.pathsep + environment.get("PYTHONPATH", "")
+    # Exercise the same package as the parent, including installed wheel/sdist
+    # runs. A fixed checkout/src path would silently bypass distribution tests.
+    environment["PYTHONPATH"] = str(Path(cheragh.__file__).resolve().parents[1])
 
     def contender():
         return subprocess.run(
