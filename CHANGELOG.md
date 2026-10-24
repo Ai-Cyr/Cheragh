@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a packaged French web interface at `/ui/` and a `cheragh ui` CLI alias, with authenticated conversations, source inspection, index operations and a searchable architecture catalogue.
+- Permit explicit activation of the current local index after successful indexing, preserving in-flight requests and refusing late activation after timeout or cancellation.
+- Exercise the installed interface in Chromium, including authentication, source rendering, index activation, reverse-proxy paths, session clearing and mobile layouts.
+
 - Run the full Python 3.10–3.13 test matrix against installed wheels and validate the shipped test suite against the source distribution without importing checkout sources.
 - Lock every dependency of the default Python 3.12 server image with hashes; verify the built wheel's extras against that lock before accepting the image.
 - Reject invalid YAML roots, cyclic or excessively expanded configuration aliases, non-finite numeric settings and malformed legacy cache configuration with bounded, redacted diagnostics.

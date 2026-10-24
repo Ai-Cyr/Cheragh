@@ -99,6 +99,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 cheragh = ["py.typed"]
+"cheragh.server" = ["static/*.html", "static/*.css", "static/*.js"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta
+      name="description"
+      content="Explorez vos documents avec Cheragh, votre espace de recherche augmenté."
+    />
+    <title>Cheragh — Votre espace de connaissance</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23282d26'/%3E%3Cpath d='M20 7l3 10 10 3-10 3-3 10-3-10-10-3 10-3z' fill='%23e9b85b'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="app.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Aller au contenu</a>
+    <div class="workspace">
+      <aside class="sidebar" aria-label="Navigation principale">
+        <a class="brand" href="./" aria-label="Cheragh, accueil"
+          ><span class="brand-mark" aria-hidden="true">✦</span
+          ><span
+            >Cheragh<span class="brand-subtitle"
+              >ESPACE DE CONNAISSANCE</span
+            ></span
+          ></a
+        >
+        <div class="sidebar-section">VOTRE ESPACE</div>
+        <nav class="navigation" aria-label="Vues de l’application">
+          <button
+            type="button"
+            class="nav-item active"
+            data-panel="conversation"
+            aria-current="page"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20 11.5a8.5 8.5 0 0 1-8.5 8.5H4l1.8-4A8.5 8.5 0 1 1 20 11.5Z"
+              />
+              <path d="M8 10h7M8 14h4" /></svg
+            ><span>Conversation</span
+            ><svg class="nav-arrow" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 18 18 6M6 6h12v12" />
+            </svg>
+          </button>
+          <button type="button" class="nav-item" data-panel="documents">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"
+              />
+              <path d="M14 3v6h6M8 13h8M8 17h5" /></svg
+            ><span>Documents</span>
+          </button>
+          <button type="button" class="nav-item" data-panel="architectures">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5" /></svg
+            ><span>Architectures</span>
+          </button>
+        </nav>
+        <div class="sidebar-divider"></div>
+        <div class="connection-card">
+          <div class="eyebrow">CONNEXION AU SERVEUR</div>
+          <p class="connection-copy" id="connection-copy">
+            Connectez votre espace pour explorer vos documents.
+          </p>
+          <form id="connection-form">
+            <label for="api-key">Clé API</label>
+            <input
+              id="api-key"
+              name="api-key"
+              type="password"
+              autocomplete="off"
+              placeholder="Votre clé, si nécessaire"
+              maxlength="4096"
+              spellcheck="false"
+              aria-describedby="key-help"
+            />
+            <p class="field-help" id="key-help">
+              La clé reste uniquement dans cet onglet.
+            </p>
+            <button
+              class="button button-dark full-width"
+              id="connect-button"
+              type="submit"
+            >
+              Se connecter <span aria-hidden="true">→</span>
+            </button>
+          </form>
+          <div id="session-controls" hidden>
+            <div class="session-info">
+              <span class="status-dot online" aria-hidden="true"></span>Session
+              active
+            </div>
+            <button
+              class="button button-outline full-width"
+              type="button"
+              id="disconnect-button"
+            >
+              Se déconnecter
+            </button>
+          </div>
+          <p class="inline-message" id="connection-message" role="status"></p>
+        </div>
+        <div class="sidebar-footer">
+          <span class="tiny-spark" aria-hidden="true">✦</span>
+          <p>Vos documents.<br />Des réponses qui remontent à la source.</p>
+          <span id="sidebar-version" class="version-label">CHERAGH</span>
+        </div>
+      </aside>
+
+      <div class="main-shell">
+        <header class="topbar">
+          <div class="breadcrumb">
+            Espace de travail <span aria-hidden="true">/</span>
+            <strong id="view-name">Conversation</strong>
+          </div>
+          <div class="server-status" id="server-status">
+            <span class="status-dot" aria-hidden="true"></span
+            ><span id="server-status-text">Non connecté</span>
+          </div>
+        </header>
+        <main id="main-content" tabindex="-1">
+          <section
+            class="view"
+            id="panel-conversation"
+            aria-labelledby="conversation-title"
+          >
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">RECHERCHER. COMPRENDRE. EXPLORER.</div>
+                <h1 id="conversation-title">
+                  Faites parler vos documents<span class="heading-dot">.</span>
+                </h1>
+                <p>
+                  Posez une question. Retrouvez les réponses et les sources qui
+                  les éclairent.
+                </p>
+              </div>
+              <button
+                class="button button-outline compact"
+                type="button"
+                id="clear-button"
+                disabled
+              >
+                <span aria-hidden="true">＋</span> Nouvelle conversation
+              </button>
+            </div>
+            <div class="conversation-layout">
+              <div class="conversation-column">
+                <div class="conversation-surface">
+                  <div class="welcome" id="welcome">
+                    <div class="welcome-art" aria-hidden="true">
+                      <div class="art-orbit orbit-one"></div>
+                      <div class="art-orbit orbit-two"></div>
+                      <div class="art-document">
+                        <span></span><span></span><span></span><i>✦</i>
+                      </div>
+                      <div class="art-spark">✦</div>
+                      <div class="art-note">→</div>
+                    </div>
+                    <span class="small-label"
+                      >LA CONNAISSANCE COMMENCE PAR UNE QUESTION</span
+                    >
+                    <h2>Que souhaitez-vous découvrir ?</h2>
+                    <p id="welcome-copy">
+                      Connectez-vous, puis posez une question sur les documents
+                      de votre index.
+                    </p>
+                    <div class="suggestions" aria-label="Exemples de questions">
+                      <button
+                        type="button"
+                        data-question="Quels sont les points essentiels de ces documents ?"
+                      >
+                        Dégager les points essentiels
+                        <span aria-hidden="true">→</span></button
+                      ><button
+                        type="button"
+                        data-question="Quelles étapes sont recommandées dans les documents ?"
+                      >
+                        Retrouver les étapes clés
+                        <span aria-hidden="true">→</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div
+                    id="messages"
+                    class="messages"
+                    aria-live="polite"
+                    aria-relevant="additions text"
+                  ></div>
+                </div>
+                <form class="composer" id="ask-form">
+                  <label class="visually-hidden" for="question"
+                    >Votre question</label
+                  ><textarea
+                    id="question"
+                    rows="3"
+                    maxlength="8000"
+                    placeholder="Posez une question sur vos documents…"
+                    required
+                    disabled
+                  ></textarea>
+                  <div class="composer-bottom">
+                    <span class="composer-hint" id="composer-hint"
+                      >Connectez-vous pour commencer.</span
+                    ><button
+                      class="button button-outline"
+                      id="cancel-button"
+                      type="button"
+                      hidden
+                    >
+                      Annuler la requête</button
+                    ><button
+                      class="button button-amber"
+                      id="ask-button"
+                      type="submit"
+                      disabled
+                    >
+                      Envoyer la question <span aria-hidden="true">↑</span>
+                    </button>
+                  </div>
+                </form>
+                <p class="disclaimer">
+                  Les réponses peuvent contenir des erreurs. Vérifiez les
+                  sources avant de prendre une décision.
+                </p>
+              </div>
+              <aside class="context-column" aria-label="Contexte de recherche">
+                <section class="context-card">
+                  <div class="card-title">
+                    <h2>Votre index</h2>
+                    <span class="mini-icon" aria-hidden="true">▤</span>
+                  </div>
+                  <div class="index-number" id="document-count">—</div>
+                  <p class="muted">fragments disponibles</p>
+                  <div class="card-rule"></div>
+                  <label for="top-k">Nombre de sources</label>
+                  <div class="source-control">
+                    <input
+                      id="top-k"
+                      name="top-k"
+                      type="number"
+                      min="1"
+                      max="50"
+                      value="5"
+                      required
+                      disabled
+                    /><span>par recherche</span>
+                  </div>
+                  <p class="field-help">
+                    Ajustez le nombre de passages recherchés pour chaque
+                    question.
+                  </p>
+                  <button
+                    type="button"
+                    class="text-button"
+                    id="refresh-button"
+                    disabled
+                  >
+                    Actualiser l’état <span aria-hidden="true">↻</span>
+                  </button>
+                </section>
+                <section class="context-card sources-card">
+                  <div class="card-title">
+                    <h2>Sources de la réponse</h2>
+                    <span class="source-count" id="source-count">0</span>
+                  </div>
+                  <div id="source-list">
+                    <p class="sources-placeholder">
+                      Les passages utilisés apparaîtront ici après votre
+                      première question.
+                    </p>
+                  </div>
+                </section>
+                <div class="context-note">
+                  <span aria-hidden="true">✦</span>
+                  <p>
+                    Une réponse est plus utile quand on sait d’où elle vient.
+                  </p>
+                </div>
+              </aside>
+            </div>
+          </section>
+
+          <section
+            class="view"
+            id="panel-documents"
+            aria-labelledby="documents-title"
+            hidden
+          >
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">CONSTRUIRE VOTRE BASE DE CONNAISSANCE</div>
+                <h1 id="documents-title">
+                  Vos documents, organisés<span class="heading-dot">.</span>
+                </h1>
+                <p>
+                  Transformez les fichiers présents sur le serveur en un index
+                  interrogeable.
+                </p>
+              </div>
+            </div>
+            <div class="documents-layout">
+              <section class="form-card">
+                <div class="section-heading">
+                  <span class="step-number">01</span>
+                  <div>
+                    <h2>Indexer des documents</h2>
+                    <p>
+                      Choisissez un fichier ou un dossier dans l’espace
+                      autorisé.
+                    </p>
+                  </div>
+                </div>
+                <div id="index-notice" class="notice">
+                  Connectez-vous pour vérifier les options d’indexation
+                  disponibles.
+                </div>
+                <form id="index-form">
+                  <fieldset id="index-fields" disabled>
+                    <label for="index-path">Chemin des documents</label
+                    ><input
+                      id="index-path"
+                      name="path"
+                      type="text"
+                      placeholder="documents/guide.txt ou documents/"
+                      maxlength="4096"
+                      required
+                    />
+                    <p class="field-help">
+                      Chemin sur le serveur, relatif au dossier d’indexation
+                      autorisé.
+                    </p>
+                    <label for="index-output">Dossier de l’index</label
+                    ><input
+                      id="index-output"
+                      name="output"
+                      type="text"
+                      value=".cheragh_index"
+                      maxlength="4096"
+                      required
+                    />
+                    <div class="form-grid">
+                      <div>
+                        <label for="chunk-size">Taille des fragments</label
+                        ><input
+                          id="chunk-size"
+                          type="number"
+                          min="1"
+                          max="100000"
+                          value="800"
+                          required
+                        />
+                        <p class="field-help">En caractères.</p>
+                      </div>
+                      <div>
+                        <label for="chunk-overlap">Chevauchement</label
+                        ><input
+                          id="chunk-overlap"
+                          type="number"
+                          min="0"
+                          max="99999"
+                          value="120"
+                          required
+                        />
+                        <p class="field-help">
+                          Inférieur à la taille du fragment.
+                        </p>
+                      </div>
+                    </div>
+                    <label class="checkbox-label"
+                      ><input
+                        id="index-incremental"
+                        type="checkbox"
+                        checked
+                      /><span
+                        >Traiter uniquement les fichiers modifiés</span
+                      ></label
+                    ><label class="checkbox-label" id="activation-option" hidden
+                      ><input
+                        id="index-activate"
+                        type="checkbox"
+                        checked
+                      /><span>Activer cet index après l’indexation</span></label
+                    >
+                    <div class="form-actions">
+                      <button
+                        class="button button-dark"
+                        id="index-button"
+                        type="submit"
+                      >
+                        Indexer les documents <span aria-hidden="true">→</span>
+                      </button>
+                    </div>
+                  </fieldset>
+                </form>
+                <div
+                  id="index-result"
+                  class="index-result"
+                  role="status"
+                  hidden
+                ></div>
+              </section>
+              <aside class="document-guide">
+                <div class="guide-emblem" aria-hidden="true">▤</div>
+                <h2>Une bonne réponse commence par de bonnes sources.</h2>
+                <p>
+                  Ajoutez des documents précis, à jour et pertinents pour les
+                  questions que vous souhaitez poser.
+                </p>
+                <ol>
+                  <li>
+                    <strong>Préparez vos fichiers</strong
+                    ><span
+                      >Placez-les dans le dossier autorisé sur le serveur.</span
+                    >
+                  </li>
+                  <li>
+                    <strong>Créez votre index</strong
+                    ><span
+                      >Cheragh découpe et organise les passages utiles.</span
+                    >
+                  </li>
+                  <li>
+                    <strong>Explorez votre contenu</strong
+                    ><span
+                      >Revenez dans Conversation pour poser vos questions.</span
+                    >
+                  </li>
+                </ol>
+                <p class="field-help">
+                  L’indexation doit être explicitement autorisée par
+                  l’administrateur. Les fichiers restent sur le serveur.
+                </p>
+              </aside>
+            </div>
+          </section>
+
+          <section
+            class="view"
+            id="panel-architectures"
+            aria-labelledby="architectures-title"
+            hidden
+          >
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">EXPLORER LES POSSIBILITÉS</div>
+                <h1 id="architectures-title">
+                  Une boîte à outils, plusieurs approches<span
+                    class="heading-dot"
+                    >.</span
+                  >
+                </h1>
+                <p>
+                  Découvrez les techniques de Cheragh et leurs limites de
+                  qualification.
+                </p>
+              </div>
+            </div>
+            <div class="catalog-toolbar">
+              <div class="search-field">
+                <label class="visually-hidden" for="technique-search"
+                  >Rechercher une architecture</label
+                ><svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="10.5" cy="10.5" r="6.5" />
+                  <path d="m16 16 5 5" /></svg
+                ><input
+                  id="technique-search"
+                  type="search"
+                  placeholder="Rechercher une technique, une famille…"
+                  autocomplete="off"
+                  disabled
+                />
+              </div>
+              <label class="visually-hidden" for="technique-status"
+                >Maturité</label
+              ><select id="technique-status" disabled>
+                <option value="all">Toutes les maturités</option>
+                <option value="stable">Stable</option>
+                <option value="beta">Bêta</option>
+                <option value="experimental">Expérimentale</option>
+                <option value="planned">Planifiée</option>
+              </select>
+            </div>
+            <p class="catalog-description">
+              <span id="technique-count"
+                >Connectez-vous pour charger le catalogue.</span
+              >
+              La disponibilité d’une technique ne garantit pas sa qualification
+              pour votre déploiement.
+            </p>
+            <div
+              id="technique-grid"
+              class="technique-grid"
+              aria-live="polite"
+            ></div>
+          </section>
+        </main>
+        <footer class="main-footer">
+          <span
+            >CHERAGH <span aria-hidden="true">/</span> DE LA SOURCE À LA
+            RÉPONSE</span
+          ><span>Votre espace de recherche</span>
+        </footer>
+      </div>
+    </div>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

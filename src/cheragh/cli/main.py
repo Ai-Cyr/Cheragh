@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     technique_show.add_argument("technique_id")
     technique_show.add_argument("--json", action="store_true")
 
-    serve = sub.add_parser("serve", help="Serve a RAG API with FastAPI")
+    serve = sub.add_parser("serve", aliases=["ui"], help="Serve the RAG API and graphical interface at /ui/")
     serve_source = serve.add_mutually_exclusive_group(required=True)
     serve_source.add_argument("--config", default=None)
     serve_source.add_argument("--index", default=None)
@@ -271,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_validate_config(args)
     if args.command == "techniques":
         return _cmd_techniques(args)
-    if args.command == "serve":
+    if args.command in {"serve", "ui"}:
         return _cmd_serve(args)
     return 2
 

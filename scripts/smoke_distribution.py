@@ -19,6 +19,9 @@ def main() -> None:
     assert package.is_relative_to(site_packages), f"Not an installed artifact: {package}"
     assert (package / "py.typed").is_file(), "Missing typing marker"
     assert cheragh.__version__ == importlib.metadata.version("cheragh")
+    for asset in ("index.html", "app.css", "app.js"):
+        path = package / "server" / "static" / asset
+        assert path.is_file() and path.stat().st_size > 0, f"Missing interface asset: {asset}"
     # Importing public adapters must not require their optional model runtimes.
     for name in cheragh.__all__:
         getattr(cheragh, name)

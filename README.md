@@ -22,7 +22,7 @@ Cheragh est une boîte à outils Python composable pour construire, évaluer et 
 - BM25, recherche dense et hybride, filtres metadata, reranking, compression et packing long-contexte ;
 - index local inspectable et incrémental, ou adaptateurs FAISS, Chroma et Qdrant ;
 - réponses structurées avec sources, citations, avertissements et trace d'exécution ;
-- configuration YAML/JSON validée, CLI, serveur FastAPI et évaluation ;
+- configuration YAML/JSON validée, CLI, interface graphique, serveur FastAPI et évaluation ;
 - ACL, isolation tenant/collection et cache sûr par défaut ;
 - catalogue machine-readable de 44 techniques avec statut et limites.
 
@@ -66,6 +66,23 @@ python -m pip install ".[local,openai,qdrant,pdf,docx]"
 ```
 
 Les modèles locaux sont téléchargés à leur première utilisation. Les fournisseurs hébergés nécessitent leurs propres identifiants, par exemple `OPENAI_API_KEY`.
+
+## Interface graphique
+
+L'interface web intégrée permet de poser des questions, consulter les sources,
+suivre l'index et parcourir les 44 architectures avec leurs niveaux de maturité.
+
+```bash
+python -m pip install ".[fastapi,config]"
+cheragh index ./docs --output .cheragh_index
+cheragh ui --index .cheragh_index
+```
+
+Ouvrez **http://127.0.0.1:8000/ui/**. `cheragh ui` accepte les mêmes options que
+`cheragh serve`, notamment `--config rag.yaml`. L'indexation depuis l'interface
+est disponible lorsque le serveur l'autorise explicitement. Voir le
+[guide de l'interface](docs/interface.md) pour l'authentification et l'activation
+d'un index sans redémarrage.
 
 ## Démarrage rapide en Python
 
