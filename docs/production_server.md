@@ -3,6 +3,19 @@
 The FastAPI application has conservative process-level boundaries, but it is
 still intended to run behind a TLS-terminating reverse proxy or API gateway.
 
+## Graphical interface
+
+The packaged interface is served at `/ui/`, with `/` redirecting there.
+`cheragh ui` is an alias of `cheragh serve` with identical startup controls.
+The static shell is public; `/ui/api/settings` and `/ui/api/techniques` reuse
+the API key dependency. Browser requests stay on the same origin, and the
+key remains only in tab memory. See the [interface guide](interface.md).
+
+The UI uses a restrictive Content-Security-Policy with local scripts/styles,
+no inline scripts, no external resources and `frame-ancestors 'none'`.
+Deployments behind a path prefix must forward that prefix as the ASGI
+`root_path`; the UI's assets and API URLs are relative to it.
+
 ## Secure startup
 
 Set the secret through the process environment or a secret manager, not as a
@@ -78,6 +91,16 @@ indexing exceptions are redacted from HTTP responses. Prefer a separate,
 non-public indexing deployment when runtime ingestion is not essential.
 The explicit CLI option `--no-enable-indexing` disables this endpoint even when
 `CHERAGH_ENABLE_INDEXING=true` is present in the inherited environment.
+
+The optional request field `activate: true` reloads the serving index after a
+successful build. This is permitted only for direct local `index_path` servers
+using `HashingEmbedding`, and only when the requested output is exactly the
+current index beneath the allowed root. Supplied engines and config-based
+servers cannot be replaced this way. In-flight requests retain their engine;
+new requests see the replacement only after successful loading. A timeout or
+server-side cancellation never activates a late result, though the already
+running disk operation can finish. Index writes are serialized per process.
+Coordinate activation across workers at the deployment layer.
 
 ## Infrastructure still required
 

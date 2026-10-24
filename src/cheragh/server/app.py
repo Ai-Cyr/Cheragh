@@ -15,12 +15,12 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .. import __version__
-from ..base import EmbeddingModel, _validate_top_k
+from ..base import EmbeddingModel, HashingEmbedding, _validate_top_k
 from ..engine import RAGEngine
 from ..vectorstores.memory import MemoryVectorStore
 
@@ -46,6 +46,7 @@ class IndexRequest(BaseModel):
     path: str = Field(..., min_length=1, max_length=4_096)
     output: str = Field(default=".cheragh_index", min_length=1, max_length=4_096)
     incremental: bool = True
+    activate: bool = False
     chunk_size: int = Field(default=800, ge=1, le=100_000)
     chunk_overlap: int = Field(default=120, ge=0, le=100_000)
 
@@ -407,6 +408,15 @@ def create_app(
     stream_max_duration_seconds = _positive_float(stream_max_duration_seconds, "stream_max_duration_seconds")
     allow_prompt_exposure = _require_bool(allow_prompt_exposure, "allow_prompt_exposure")
 
+    # Only the factory's plain local-index mode can replace its serving engine.
+    # Configuration and injected engines can have custom generation, ACLs and
+    # providers which rebuilding a default engine would silently discard.
+    serving_index = (
+        Path(index_path).resolve()
+        if engine is None and not config_path and index_path else None
+    )
+    serving_embedding: EmbeddingModel | None = None
+
     # Fail invalid security and resource settings before opening indexes or
     # initializing provider clients from a configuration file.
     if engine is None:
@@ -414,6 +424,7 @@ def create_app(
             engine = RAGEngine.from_config(config_path)
         elif index_path:
             store = MemoryVectorStore.load(index_path, index_embedding_model)
+            serving_embedding = store.embedding_model
             engine = RAGEngine(store.as_retriever())
         else:
             raise ValueError("create_app requires engine, config_path or index_path")
@@ -422,6 +433,7 @@ def create_app(
     default_top_k = min(_validate_top_k(getattr(engine, "top_k", max_top_k)), max_top_k)
 
     operation_limiter = _OperationLimiter(max_concurrent_operations)
+    index_write_lock = threading.Lock()
     app = FastAPI(title="cheragh", version=__version__)
     app.add_middleware(_ProductionBoundaryMiddleware, max_request_body_bytes=max_request_body_bytes)
 
@@ -435,6 +447,27 @@ def create_app(
             )
 
     AuthDependency = Depends(require_api_key)
+
+    index_output: str | None = None
+    if serving_index is not None and root is not None and isinstance(serving_embedding, HashingEmbedding):
+        try:
+            index_output = serving_index.relative_to(root).as_posix()
+        except ValueError:
+            pass
+
+    from .ui import register_ui_routes
+
+    register_ui_routes(app, AuthDependency, lambda: {
+        "version": __version__,
+        "auth_required": required_api_key is not None,
+        "indexing_enabled": indexing_enabled,
+        "max_top_k": max_top_k,
+        "default_top_k": default_top_k,
+        "request_timeout_seconds": request_timeout_seconds,
+        "index_timeout_seconds": index_timeout_seconds,
+        "can_activate_index": indexing_enabled and index_output is not None,
+        "index_output": index_output,
+    })
 
     class ManagedStreamingResponse(StreamingResponse):
         async def __call__(self, scope, receive, send) -> None:
@@ -477,12 +510,13 @@ def create_app(
             raise HTTPException(status_code=422, detail=f"top_k must be <= {max_top_k}")
         if request.include_prompt and not allow_prompt_exposure:
             raise HTTPException(status_code=403, detail="Prompt exposure is disabled")
+        request_engine = cast(RAGEngine, engine)
         try:
             return await operation_limiter.run(
                 # Response conversion is synchronous extension code as well;
                 # keep it off the event loop and inside the same deadline and
                 # capacity permit as generation.
-                lambda: engine.ask(request.query, top_k=request.top_k or default_top_k).to_dict(
+                lambda: request_engine.ask(request.query, top_k=request.top_k or default_top_k).to_dict(
                     include_prompt=request.include_prompt,
                 ),
                 timeout_seconds=request_timeout_seconds,
@@ -501,12 +535,13 @@ def create_app(
         stream_lease = operation_limiter.reserve()
         if stream_lease is None:
             raise HTTPException(status_code=503, detail="Server is busy", headers={"Retry-After": "1"})
+        request_engine = cast(RAGEngine, engine)
 
         def guarded_stream() -> Iterator[str]:
             iterator: Iterator[str] | None = None
             deadline = time.monotonic() + stream_max_duration_seconds
             try:
-                iterator = iter(engine.stream(request.query, top_k=request.top_k or default_top_k))
+                iterator = iter(request_engine.stream(request.query, top_k=request.top_k or default_top_k))
                 while time.monotonic() < deadline:
                     try:
                         chunk = next(iterator)
@@ -539,6 +574,7 @@ def create_app(
 
     @app.post("/index", dependencies=[AuthDependency])
     async def index(request: IndexRequest) -> dict[str, Any]:
+        nonlocal engine
         if not indexing_enabled:
             raise HTTPException(status_code=403, detail="Indexing endpoint is disabled")
         if root is None:  # Defensive: startup validation above should make this unreachable.
@@ -551,17 +587,50 @@ def create_app(
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="Invalid index path") from exc
 
+        if request.activate and (index_output is None or output_path != serving_index):
+            raise HTTPException(status_code=400, detail="Activation requires the server's configured local index")
+        if not index_write_lock.acquire(blocking=False):
+            raise HTTPException(status_code=503, detail="Indexing is already running", headers={"Retry-After": "1"})
+
+        write_lease = _OperationLease(index_write_lock.release)
+        worker_started = threading.Event()
+        worker_finished = threading.Event()
+        abandoned = threading.Event()
+
+        def build_snapshot() -> tuple[dict[str, Any], RAGEngine | None]:
+            worker_started.set()
+            try:
+                if abandoned.is_set():
+                    raise _OperationTimeoutError("index operation abandoned before worker start")
+                options: dict[str, Any] = {
+                    "chunk_size": request.chunk_size,
+                    "chunk_overlap": request.chunk_overlap,
+                    "incremental": request.incremental,
+                }
+                if request.activate:
+                    options["embedding_model"] = serving_embedding
+                result = build_index(input_path, output_path, **options)
+                candidate = (
+                    RAGEngine(MemoryVectorStore.load(output_path, serving_embedding).as_retriever())
+                    if request.activate else None
+                )
+                return result, candidate
+            finally:
+                worker_finished.set()
+                if abandoned.is_set():
+                    write_lease.release()
+
         try:
-            return await operation_limiter.run(
-                lambda: build_index(
-                    input_path,
-                    output_path,
-                    chunk_size=request.chunk_size,
-                    chunk_overlap=request.chunk_overlap,
-                    incremental=request.incremental,
-                ),
+            result, candidate = await operation_limiter.run(
+                build_snapshot,
                 timeout_seconds=index_timeout_seconds,
             )
+            # Publication runs on the event loop only after the bounded await
+            # succeeds. A timed-out/cancelled worker can finish its disk write,
+            # but can never silently replace the currently serving engine.
+            if candidate is not None:
+                engine = candidate
+            return {**result, "activated": candidate is not None}
         except _ServerBusyError as exc:
             raise HTTPException(status_code=503, detail="Server is busy", headers={"Retry-After": "1"}) from exc
         except _OperationTimeoutError as exc:
@@ -572,27 +641,34 @@ def create_app(
         except Exception as exc:
             logger.error("index_operation_failed", extra={"error_type": type(exc).__name__})
             raise HTTPException(status_code=500, detail="Indexing failed")
+        finally:
+            abandoned.set()
+            if worker_finished.is_set() or not worker_started.is_set():
+                write_lease.release()
 
     @app.get("/stats", dependencies=[AuthDependency])
     async def stats() -> dict[str, Any]:
         # Cache backends may need disk or network I/O even for statistics.
         # Account for this work exactly like generation so stalled monitoring
         # requests cannot exhaust the worker pool or bypass operation limits.
+        request_engine = cast(RAGEngine, engine)
         try:
-            return await operation_limiter.run(collect_stats, timeout_seconds=request_timeout_seconds)
+            return await operation_limiter.run(
+                lambda: collect_stats(request_engine), timeout_seconds=request_timeout_seconds,
+            )
         except _ServerBusyError as exc:
             raise HTTPException(status_code=503, detail="Server is busy", headers={"Retry-After": "1"}) from exc
         except _OperationTimeoutError as exc:
             raise HTTPException(status_code=504, detail="Request timed out") from exc
 
-    def collect_stats() -> dict[str, Any]:
-        retriever = getattr(engine, "retriever", None)
+    def collect_stats(request_engine: RAGEngine) -> dict[str, Any]:
+        retriever = getattr(request_engine, "retriever", None)
         store = getattr(retriever, "store", None)
         docs = getattr(store, "documents", None)
-        cache_backend = getattr(engine, "cache_backend", None)
+        cache_backend = getattr(request_engine, "cache_backend", None)
         return {
             "document_count": len(docs) if docs is not None else None,
-            "top_k": getattr(engine, "top_k", None),
+            "top_k": getattr(request_engine, "top_k", None),
             "cache": cache_backend.stats().to_dict() if cache_backend is not None else None,
         }
 

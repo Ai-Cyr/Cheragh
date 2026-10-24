@@ -45,6 +45,13 @@ def main() -> None:
         time.sleep(0.25)
 
     assert request("/health")[0] == 200
+    status, page = request("/ui/")
+    assert status == 200 and b"Cheragh" in page, "Packaged interface is unavailable"
+    for asset in ("app.css", "app.js"):
+        assert request(f"/ui/{asset}")[0] == 200, f"Missing interface asset: {asset}"
+    assert request("/ui/api/settings")[0] == 401
+    status, settings = request("/ui/api/settings", authenticated=True)
+    assert status == 200 and json.loads(settings)["indexing_enabled"] is False
     assert request("/stats")[0] == 401, "Unauthenticated access was permitted"
     assert request("/stats", authenticated=True)[0] == 200
     question = {"query": "What is the production release identifier?"}

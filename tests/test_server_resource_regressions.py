@@ -50,9 +50,10 @@ def test_invalid_listener_configuration_precedes_provider_initialization(options
 
 
 @pytest.mark.parametrize("options, expected", [([], None), (["--enable-indexing"], True), (["--no-enable-indexing"], False)])
-def test_cli_preserves_environment_default_and_explicit_indexing_overrides(options, expected):
+@pytest.mark.parametrize("command", ["serve", "ui"])
+def test_cli_preserves_environment_default_and_explicit_indexing_overrides(options, expected, command):
     with patch("cheragh.server.main.serve") as run:
-        assert main(["serve", "--config", "rag.yaml", *options]) == 0
+        assert main([command, "--config", "rag.yaml", *options]) == 0
     assert run.call_args.kwargs["enable_indexing"] is expected
 
 
