@@ -12,8 +12,9 @@ import tempfile
 import time
 from typing import Any, Iterator, Sequence
 
-from .base import Document, EmbeddingModel, HashingEmbedding
-from .ingestion import chunk_documents, load_documents
+from .base import Document, EmbeddingModel, HashingEmbedding, LLMClient, _numpy
+from .ingestion import load_documents
+from .ingestion.chunkers import build_chunker, validate_chunking_options
 from .ingestion.pipeline import (
     _combined_exclude_patterns,
     _is_excluded,
@@ -28,6 +29,8 @@ _CONFIG_OVERRIDE_TARGETS = {
     "path": ("ingestion", "path"),
     "chunk_size": ("ingestion", "chunk_size"),
     "chunk_overlap": ("ingestion", "chunk_overlap"),
+    "chunking_strategy": ("ingestion", "chunking_strategy"),
+    "chunking_options": ("ingestion", "chunking_options"),
     "recursive": ("ingestion", "recursive"),
     "exclude_patterns": ("ingestion", "exclude_patterns"),
     "max_file_size_mb": ("ingestion", "max_file_size_mb"),
@@ -165,6 +168,9 @@ class IndexOptions:
     max_file_size_mb: float | None = 50
     use_lock: bool = True
     lock_timeout_seconds: float = 10.0
+    chunking_strategy: str = "recursive"
+    chunking_options: dict[str, Any] = field(default_factory=dict)
+    generation_fingerprint: str | None = None
 
 
 def index_from_config(
@@ -251,12 +257,25 @@ def index_from_config(
 
         embedding_model = _embedding_from_config(validated.embedding.model_dump(exclude_none=True))
 
+    llm_client = None
+    generation_fingerprint = None
+    if ingestion.get("chunking_strategy") == "contextual":
+        from .engine import _llm_from_config
+
+        generation_config = validated.generation.model_dump(exclude_none=True)
+        generation_fingerprint = _configuration_digest(generation_config)
+        llm_client = _llm_from_config(generation_config)
+
     return index_path(
         source_path,
         output_path,
         embedding_model=embedding_model,
         chunk_size=ingestion.get("chunk_size", 800),
         chunk_overlap=ingestion.get("chunk_overlap", 120),
+        chunking_strategy=ingestion.get("chunking_strategy", "recursive"),
+        chunking_options=ingestion.get("chunking_options"),
+        llm_client=llm_client,
+        generation_fingerprint=generation_fingerprint,
         recursive=ingestion.get("recursive", True),
         incremental=indexing.get("incremental", True),
         dry_run=indexing.get("dry_run", False),
@@ -284,18 +303,43 @@ def index_path(
     max_file_size_mb: float | None = 50,
     use_lock: bool = True,
     lock_timeout_seconds: float = 10.0,
+    *,
+    chunking_strategy: str = "recursive",
+    chunking_options: dict[str, Any] | None = None,
+    llm_client: LLMClient | None = None,
+    generation_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Index a path into a :class:`MemoryVectorStore`.
 
     The v1.0 implementation is incremental by default. It persists a manifest
     with file hash/mtime/size, keeps unchanged chunks, removes deleted source
     chunks, supports dry-runs, and uses a simple lock file to avoid concurrent
-    writers corrupting the local index.
+    writers corrupting the local index. Strategy, options and model changes
+    rebuild unchanged sources. Late/contextual vectors are stored directly.
+
+    Contextual chunking requires ``llm_client``. For an opaque custom client,
+    set ``generation_fingerprint`` and change it when its model or generation
+    settings change. Only a digest is persisted, never the client's state.
     """
 
+    # Validate the strategy and its size/overlap before opening providers,
+    # creating output directories, acquiring locks or scanning the corpus.
+    normalized_options = validate_chunking_options(chunking_strategy, chunking_options)
+    embedder = embedding_model or HashingEmbedding()
+    chunker = build_chunker(
+        chunking_strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        embedding_model=embedder, llm_client=llm_client, chunking_options=normalized_options,
+    )
+    contextual_fingerprint = (
+        _contextual_generation_fingerprint(llm_client, generation_fingerprint)
+        if chunking_strategy == "contextual" else None
+    )
     options = IndexOptions(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        chunking_strategy=chunking_strategy,
+        chunking_options=normalized_options,
+        generation_fingerprint=contextual_fingerprint,
         recursive=recursive,
         incremental=incremental,
         dry_run=dry_run,
@@ -307,7 +351,6 @@ def index_path(
         use_lock=use_lock,
         lock_timeout_seconds=lock_timeout_seconds,
     )
-    embedder = embedding_model or HashingEmbedding()
     source_root = Path(path)
     source_boundary = (
         source_root.parent if source_root.is_file() else source_root
@@ -350,6 +393,13 @@ def index_path(
         )
         current_indexing_options = _indexing_options_metadata(options)
         previous_indexing_options = previous.metadata.get(_INDEXING_OPTIONS_METADATA_KEY)
+        if isinstance(previous_indexing_options, dict):
+            # Existing snapshots predate strategy selection and were always
+            # recursive. Preserve incremental reuse when their other options
+            # are unchanged; switching to any new strategy still rebuilds.
+            previous_indexing_options = {
+                "chunking_strategy": "recursive", "chunking_options": {}, **previous_indexing_options,
+            }
         indexing_options_changed = bool(
             previous.files
             and (
@@ -421,6 +471,8 @@ def index_path(
                 kept_embeddings = existing.embeddings[kept_indices]
 
         new_docs: list[Document] = []
+        new_vectors: list[Any] = []
+        embeds_chunks = options.chunking_strategy in {"late", "contextual"}
         for source in plan.changed_files:
             file_path = _resolve_contained_candidate(Path(source), source_boundary)
             if str(file_path) != source:
@@ -433,7 +485,12 @@ def index_path(
                 exclude_patterns=scan_excludes,
                 max_file_size_mb=options.max_file_size_mb,
             )
-            chunks = chunk_documents(loaded, chunk_size=options.chunk_size, chunk_overlap=options.chunk_overlap)
+            if embeds_chunks:
+                chunks, vectors = chunker.chunk_and_embed(loaded)
+                if chunks:
+                    new_vectors.append(vectors)
+            else:
+                chunks = chunker.split_documents(loaded)
             # The planning hash and the bytes consumed by a loader must describe
             # the same generation. Abort before committing anything if a source
             # is edited concurrently; the next run can safely retry it.
@@ -451,7 +508,11 @@ def index_path(
         store = MemoryVectorStore(embedder)
         store.documents = kept_docs
         store.embeddings = kept_embeddings
-        store.add_documents(new_docs)
+        if embeds_chunks:
+            if new_docs:
+                store.add_embeddings(new_docs, _numpy().vstack(new_vectors))
+        else:
+            store.add_documents(new_docs)
         all_docs = store.documents
         store.save(output_path)
 
@@ -465,6 +526,8 @@ def index_path(
             metadata={
                 "chunk_size": options.chunk_size,
                 "chunk_overlap": options.chunk_overlap,
+                "chunking_strategy": options.chunking_strategy,
+                "chunking_options": options.chunking_options,
                 "updated_at_unix": time.time(),
                 "embedding_model": embedder.get_fingerprint(),
                 "incremental": options.incremental,
@@ -662,12 +725,67 @@ def _resolved_source(doc: Document) -> str:
     return str(Path(str(source)).resolve()) if source else ""
 
 
+def _configuration_digest(config: dict[str, Any]) -> str:
+    """Hash provider settings without persisting credentials or arbitrary objects."""
+
+    serialized = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _contextual_generation_fingerprint(
+    llm_client: LLMClient | None, explicit: str | None,
+) -> str:
+    if explicit is not None and (not isinstance(explicit, str) or not explicit.strip()):
+        raise ValueError("generation_fingerprint must be a non-empty string")
+    if explicit is not None:
+        return _configuration_digest({
+            "class": f"{type(llm_client).__module__}.{type(llm_client).__qualname__}",
+            "explicit": explicit,
+        })
+    return _configuration_digest(_generation_identity(llm_client, seen=set()))
+
+
+def _generation_identity(llm_client: LLMClient | None, *, seen: set[int]) -> dict[str, Any]:
+    from .cache import CachedLLMClient
+
+    identity: dict[str, Any] = {
+        "class": f"{type(llm_client).__module__}.{type(llm_client).__qualname__}",
+    }
+    if isinstance(llm_client, CachedLLMClient):
+        if id(llm_client) in seen:
+            raise ValueError("CachedLLMClient wrappers must not contain a cycle")
+        seen.add(id(llm_client))
+        # Only traverse our known wrapper, never an arbitrary SDK's client
+        # attribute. Its automatic cache fingerprint may isolate instances;
+        # persistent indexes need stable provider identity across restarts.
+        identity["client"] = _generation_identity(llm_client.client, seen=seen)
+        if llm_client._explicit_fingerprint is not None:
+            identity["cache_fingerprint"] = llm_client._explicit_fingerprint
+        return identity
+    # Opaque Python clients can provide a stable explicit fingerprint. Do not
+    # inspect __dict__: SDK clients commonly contain API credentials.
+    fingerprint = getattr(llm_client, "get_fingerprint", None)
+    if callable(fingerprint):
+        value = fingerprint()
+        if not isinstance(value, str) or not value:
+            raise ValueError("LLM get_fingerprint() must return a non-empty string")
+        identity["fingerprint"] = value
+    for name in ("model", "model_name"):
+        value = getattr(llm_client, name, None)
+        if isinstance(value, (str, int, float, bool)):
+            identity[name] = value
+    return identity
+
+
 def _indexing_options_metadata(options: IndexOptions) -> dict[str, Any]:
     """Return the persisted contract that determines chunks and corpus scope."""
 
     return {
         "chunk_size": options.chunk_size,
         "chunk_overlap": options.chunk_overlap,
+        "chunking_strategy": options.chunking_strategy,
+        "chunking_options": options.chunking_options,
+        **({"generation_fingerprint": options.generation_fingerprint} if options.generation_fingerprint else {}),
         "recursive": options.recursive,
         "include_pdf": options.include_pdf,
         "include_docx": options.include_docx,

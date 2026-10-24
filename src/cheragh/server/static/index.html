@@ -343,6 +343,59 @@
                       maxlength="4096"
                       required
                     />
+                    <label for="chunking-strategy"
+                      >Technique de découpage</label
+                    >
+                    <select
+                      id="chunking-strategy"
+                      name="chunking_strategy"
+                      aria-describedby="chunking-help"
+                      required
+                    >
+                      <option value="recursive">Récursif</option>
+                    </select>
+                    <p class="field-help" id="chunking-help">
+                      Privilégie les paragraphes et les phrases dans la limite
+                      choisie.
+                    </p>
+                    <ul class="field-help" id="chunking-capabilities"></ul>
+                    <div id="semantic-options" hidden>
+                      <div class="form-grid">
+                        <div>
+                          <label for="semantic-buffer">Phrases voisines</label>
+                          <input
+                            id="semantic-buffer"
+                            type="number"
+                            min="0"
+                            max="32"
+                            value="0"
+                            required
+                            disabled
+                          />
+                          <p class="field-help">
+                            Contexte de chaque phrase, de chaque côté.
+                          </p>
+                        </div>
+                        <div>
+                          <label for="semantic-percentile"
+                            >Percentile de rupture</label
+                          >
+                          <input
+                            id="semantic-percentile"
+                            type="number"
+                            min="0.01"
+                            max="99.99"
+                            step="0.01"
+                            placeholder="Seuil fixe par défaut"
+                            disabled
+                          />
+                          <p class="field-help">
+                            Vide : seuil fixe. Sinon, percentile des distances
+                            de 0 à 100 exclus.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                     <div class="form-grid">
                       <div>
                         <label for="chunk-size">Taille des fragments</label
@@ -354,7 +407,9 @@
                           value="800"
                           required
                         />
-                        <p class="field-help">En caractères.</p>
+                        <p class="field-help" id="chunk-size-unit">
+                          En caractères.
+                        </p>
                       </div>
                       <div>
                         <label for="chunk-overlap">Chevauchement</label
@@ -366,8 +421,8 @@
                           value="120"
                           required
                         />
-                        <p class="field-help">
-                          Inférieur à la taille du fragment.
+                        <p class="field-help" id="chunk-overlap-unit">
+                          En caractères, inférieur à la taille du fragment.
                         </p>
                       </div>
                     </div>

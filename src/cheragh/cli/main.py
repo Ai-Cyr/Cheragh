@@ -12,11 +12,13 @@ from ..base import HashingEmbedding, OpenAILLMClient, ExtractiveLLMClient
 from ..engine import RAGEngine
 from ..evaluation import evaluate_retrieval
 from ..indexing import index_from_config, index_path as build_index, inspect_index
+from ..ingestion.chunkers import CHUNKING_STRATEGIES
 from ..vectorstores import MemoryVectorStore
 
 DEFAULT_CONFIG = """# cheragh configuration
 ingestion:
   path: ./docs
+  chunking_strategy: recursive
   chunk_size: 800
   chunk_overlap: 120
 
@@ -98,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     index.add_argument("--output", "-o", default=None, help="Output index directory")
     index.add_argument("--chunk-size", type=_positive_int, default=None)
     index.add_argument("--chunk-overlap", type=int, default=None)
+    index.add_argument(
+        "--chunking-strategy", choices=CHUNKING_STRATEGIES, default=None,
+        help="Document splitting strategy (default: recursive, or the configuration value)",
+    )
     index.add_argument("--dimension", type=_positive_int, default=None, help="Override the HashingEmbedding dimension")
     incremental = index.add_mutually_exclusive_group()
     incremental.add_argument(
@@ -298,6 +304,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
         if args.dimension is not None:
             call_kwargs["embedding_model"] = HashingEmbedding(dimension=args.dimension)
         config_overrides = {
+            "chunking_strategy": args.chunking_strategy,
             "chunk_size": args.chunk_size,
             "chunk_overlap": args.chunk_overlap,
             "incremental": args.incremental,
@@ -323,6 +330,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
         embedding_model=HashingEmbedding(dimension=args.dimension if args.dimension is not None else 384),
         chunk_size=args.chunk_size if args.chunk_size is not None else 800,
         chunk_overlap=args.chunk_overlap if args.chunk_overlap is not None else 120,
+        **({"chunking_strategy": args.chunking_strategy} if args.chunking_strategy is not None else {}),
         incremental=args.incremental if args.incremental is not None else True,
         dry_run=args.dry_run if args.dry_run is not None else False,
         force=args.force if args.force is not None else False,

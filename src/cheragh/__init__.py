@@ -238,6 +238,15 @@ if TYPE_CHECKING:
     from .ingestion import PDFLayoutChunker as PDFLayoutChunker
     from .ingestion import RecursiveTextChunker as RecursiveTextChunker
     from .ingestion import SemanticChunker as SemanticChunker
+    from .ingestion import SentenceTextChunker as SentenceTextChunker
+    from .ingestion import ParagraphChunker as ParagraphChunker
+    from .ingestion import LateChunker as LateChunker
+    from .ingestion import ContextualChunker as ContextualChunker
+    from .ingestion import TransformersTokenEmbedding as TransformersTokenEmbedding
+    from .ingestion import CHUNKING_STRATEGIES as CHUNKING_STRATEGIES
+    from .ingestion import build_chunker as build_chunker
+    from .ingestion import list_chunking_strategies as list_chunking_strategies
+    from .ingestion import validate_chunking_options as validate_chunking_options
     from .ingestion import SentenceWindowChunker as SentenceWindowChunker
     from .ingestion import TableChunker as TableChunker
     from .ingestion import TextChunk as TextChunk
@@ -544,6 +553,15 @@ _LAZY_EXPORTS = {
     "TextChunk": (".ingestion", "TextChunk"),
     "SentenceWindowChunker": (".ingestion", "SentenceWindowChunker"),
     "SemanticChunker": (".ingestion", "SemanticChunker"),
+    "SentenceTextChunker": (".ingestion", "SentenceTextChunker"),
+    "ParagraphChunker": (".ingestion", "ParagraphChunker"),
+    "LateChunker": (".ingestion", "LateChunker"),
+    "ContextualChunker": (".ingestion", "ContextualChunker"),
+    "TransformersTokenEmbedding": (".ingestion", "TransformersTokenEmbedding"),
+    "CHUNKING_STRATEGIES": (".ingestion", "CHUNKING_STRATEGIES"),
+    "build_chunker": (".ingestion", "build_chunker"),
+    "list_chunking_strategies": (".ingestion", "list_chunking_strategies"),
+    "validate_chunking_options": (".ingestion", "validate_chunking_options"),
     "CodeChunker": (".ingestion", "CodeChunker"),
     "TableChunker": (".ingestion", "TableChunker"),
     "PDFLayoutChunker": (".ingestion", "PDFLayoutChunker"),

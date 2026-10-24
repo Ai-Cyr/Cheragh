@@ -30,7 +30,8 @@ from ._streaming import _iterate_in_worker
 from .citations import extract_citations, validate_citations
 from .hybrid_search import BM25Retriever, HybridSearchRetriever
 from .schema import RAGResponse, Source
-from .ingestion import chunk_documents, ingest_path
+from .ingestion import load_documents
+from .ingestion.chunkers import build_chunker, validate_chunking_options
 from .pipeline import DEFAULT_ANSWER_PROMPT_FR, AdvancedRAGPipeline
 from .reranking import BaseReranker, RerankingRetriever, build_reranker
 from .compression import ContextCompressor, CompressionPipeline, ExtractiveContextCompressor, RedundancyFilter
@@ -173,13 +174,30 @@ class RAGEngine:
         compressor: ContextCompressor | str | None = None,
         query_transformer: QueryTransformer | str | None = None,
         context_packer: LongContextPacker | None = None,
+        chunking_strategy: str = "recursive",
+        chunking_options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> "RAGEngine":
         _validate_from_documents_kwargs(kwargs)
+        chunking_options = validate_chunking_options(chunking_strategy, chunking_options)
+        precomputed = chunk and chunking_strategy in {"late", "contextual"}
+        if precomputed and retriever_type.lower().replace("_", "-") not in {"memory", "vector"}:
+            raise ValueError("Late/contextual chunking requires retriever_type='memory' or 'vector'")
+        # Late chunking needs the original token encoder. The optional cache
+        # wrapper below is used for retrieval queries in the same vector space.
+        source_embedder = embedding_model or HashingEmbedding()
+        chunker = (
+            build_chunker(
+                chunking_strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                embedding_model=source_embedder, llm_client=llm_client,
+                chunking_options=chunking_options,
+            )
+            if chunk else None
+        )
         top_k = _validate_top_k(top_k)
         cache_cfg = _normalize_cache_config(kwargs.get("cache_config") or _cache_config_from_kwargs(kwargs))
         cache_backend = _resolve_cache_backend(kwargs.get("cache_backend"), cache_cfg)
-        embedder = embedding_model or HashingEmbedding()
+        embedder = source_embedder
         if cache_backend is not None and cache_cfg.get("cache_embeddings", True):
             embedder = CachedEmbeddingModel(
                 embedder,
@@ -188,8 +206,12 @@ class RAGEngine:
                 namespace=_cache_layer_namespace(cache_cfg, "embedding"),
             )
         docs = list(documents)
-        if chunk:
-            docs = chunk_documents(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        precomputed_embeddings = None
+        if chunker is not None:
+            if precomputed:
+                docs, precomputed_embeddings = chunker.chunk_and_embed(docs)
+            else:
+                docs = chunker.split_documents(docs)
 
         retriever = _build_retriever(
             docs=docs,
@@ -198,6 +220,7 @@ class RAGEngine:
             alpha=alpha,
             vectorstore_path=vectorstore_path,
             kwargs=kwargs,
+            precomputed_embeddings=precomputed_embeddings,
         )
         if reranker:
             reranker_obj = build_reranker(provider=reranker, model=reranker_model) if isinstance(reranker, str) else reranker
@@ -257,10 +280,27 @@ class RAGEngine:
         llm_client: LLMClient | None = None,
         chunk_size: int = 800,
         chunk_overlap: int = 120,
+        chunking_strategy: str = "recursive",
+        chunking_options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> "RAGEngine":
-        chunks = ingest_path(path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        return cls.from_documents(chunks, embedding_model=embedding_model, llm_client=llm_client, **kwargs)
+        validate_chunking_options(chunking_strategy, chunking_options)
+        retriever_type = str(kwargs.get("retriever_type", "hybrid")).lower().replace("_", "-")
+        if chunking_strategy in {"late", "contextual"} and retriever_type not in {"memory", "vector"}:
+            raise ValueError("Late/contextual chunking requires retriever_type='memory' or 'vector'")
+        # Validate components before reading the corpus. Construction is lazy;
+        # document encoding happens once in from_documents below.
+        build_chunker(
+            chunking_strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+            embedding_model=embedding_model, llm_client=llm_client, chunking_options=chunking_options,
+        )
+        docs = load_documents(path)
+        kwargs["chunk"] = True
+        return cls.from_documents(
+            docs, embedding_model=embedding_model, llm_client=llm_client,
+            chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+            chunking_strategy=chunking_strategy, chunking_options=chunking_options, **kwargs,
+        )
 
     @classmethod
     def from_config(cls, config_path: str | Path, documents: Iterable[Document] | None = None) -> "RAGEngine":
@@ -277,6 +317,7 @@ class RAGEngine:
         embedder = (
             HashingEmbedding(dimension=int(embedding_cfg.get("dimension", 384)))
             if retriever_type.lower().replace("_", "-") == "bm25"
+            and (documents is not None or ingestion_cfg.get("chunking_strategy", "recursive") != "semantic")
             else _embedding_from_config(embedding_cfg)
         )
         llm = _llm_from_config(config.get("generation", {}))
@@ -301,10 +342,8 @@ class RAGEngine:
             if not source_path:
                 raise ValueError("Config must define ingestion.path when documents are not provided")
             source_path = _resolve_config_path(config_dir, source_path)
-            docs = ingest_path(
+            docs = load_documents(
                 source_path,
-                chunk_size=int(ingestion_cfg.get("chunk_size", 800)),
-                chunk_overlap=int(ingestion_cfg.get("chunk_overlap", 120)),
                 recursive=bool(ingestion_cfg.get("recursive", True)),
                 exclude_patterns=ingestion_cfg.get("exclude_patterns") or None,
                 max_file_size_mb=ingestion_cfg.get("max_file_size_mb", 50),
@@ -322,6 +361,11 @@ class RAGEngine:
             docs,
             embedding_model=embedder,
             llm_client=llm,
+            chunk=documents is None,
+            chunk_size=int(ingestion_cfg.get("chunk_size", 800)),
+            chunk_overlap=int(ingestion_cfg.get("chunk_overlap", 120)),
+            chunking_strategy=ingestion_cfg.get("chunking_strategy", "recursive"),
+            chunking_options=ingestion_cfg.get("chunking_options"),
             retriever_type=retriever_type,
             alpha=float(retriever_cfg.get("alpha", 0.5)),
             bm25_k1=float(retriever_cfg.get("bm25_k1", 1.5)),
@@ -955,6 +999,7 @@ def _build_retriever(
     alpha: float,
     vectorstore_path: str | Path | None,
     kwargs: dict[str, Any],
+    precomputed_embeddings: Any = None,
 ) -> BaseRetriever:
     rt = retriever_type.lower().replace("_", "-")
     filters = kwargs.get("filters")
@@ -981,7 +1026,11 @@ def _build_retriever(
         from .vectorstores.memory import MemoryVectorStore
 
         store = MemoryVectorStore(embedder)
-        store.add_documents(docs)
+        if precomputed_embeddings is not None:
+            if docs:
+                store.add_embeddings(docs, precomputed_embeddings)
+        else:
+            store.add_documents(docs)
         if vectorstore_path:
             store.save(vectorstore_path)
         return store.as_retriever(filters=filters)
@@ -1183,6 +1232,15 @@ def _embedding_from_config(config: dict[str, Any]) -> EmbeddingModel:
     max_retries = config.get("max_retries")
     if provider in {"hashing", "local-hash"}:
         return HashingEmbedding(dimension=int(config.get("dimension", 384)))
+    if provider == "transformers-token":
+        from .ingestion.chunkers.late import TransformersTokenEmbedding
+
+        return TransformersTokenEmbedding(
+            model_name=config.get("model") or "sentence-transformers/all-MiniLM-L6-v2",
+            revision=config.get("revision"),
+            device=config.get("device", "cpu"),
+            max_tokens=config.get("max_tokens", 512),
+        )
     if provider in {"sentence-transformers", "sentence-transformer"}:
         from .base import SentenceTransformerEmbedding
 

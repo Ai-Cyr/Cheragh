@@ -1,13 +1,13 @@
-# Qualification de production des 44 techniques
+# Qualification de production des 46 techniques
 
-Cette matrice relie chacune des 44 entrées du [catalogue](../src/cheragh/catalog/techniques.py)
+Cette matrice relie chacune des 46 entrées du [catalogue](../src/cheragh/catalog/techniques.py)
 à des tests concrets et aux validations propres au déploiement. Elle distingue
 la robustesse du logiciel, vérifiable sur des doubles ou des backends locaux,
 de la qualité d'un modèle sur un corpus et de la capacité à supporter une charge.
 Un test d'algorithme réussi ne démontre ni un benchmark de publication ni un SLO.
 
-Les statuts du catalogue restent inchangés : 6 techniques stables, 12 en bêta et
-26 expérimentales. « Expérimental » reste une limite de qualification, même
+Les statuts du catalogue sont : 6 techniques stables, 12 en bêta et
+28 expérimentales. « Expérimental » reste une limite de qualification, même
 quand les entrées, les budgets, les erreurs et la provenance sont contrôlés.
 Les tests référencés ci-dessous existent dans le dépôt ; leur présence ne vaut
 pas preuve de leur exécution avec les modèles, dépendances et données déployés.
@@ -51,6 +51,8 @@ aux exigences communes de la section suivante.
 | `naive-rag` | Stable | [Contrats du moteur](../tests/test_api_consistency_core.py), [streaming](../tests/test_async_stream_production.py) : `top_k`, snapshots, absence de contexte, fermeture des flux. | Choisir les embeddings et le générateur ; mesurer réponses sourcées, abstention, latence et coût sur le corpus cible. Le générateur extractif et HashingEmbedding servent de baselines locales. |
 | `recursive-chunking` | Stable | [Ingestion](../tests/test_v02_features.py), [frontières tokenizers](../tests/test_retrieval_cross_review.py) : métadonnées parent et préservation du texte. | Fixer taille/chevauchement et tokenizer ; vérifier Unicode, tableaux et limites de fichiers avec les documents réels. |
 | `semantic-chunking` | Bêta | [Ruptures thématiques](../tests/test_v041_chunking_routing.py), [stabilité numérique](../tests/test_retrieval_cross_review.py). | Qualifier l'encodeur, les seuils de rupture et le coût d'indexation ; mesurer le rappel après découpage. |
+| `late-chunking` | Expérimental | [Vrai encodeur BERT local et pooling](../tests/test_late_chunking.py), [vecteurs pré-calculés](../tests/test_precomputed_memory_vectors.py), [index et cache](../tests/test_advanced_chunking_pipeline.py). | Installer `late-chunking` et qualifier un encodeur à offsets fiables ; fixer sa capacité réelle, rejeter les documents trop longs, conserver les vecteurs calculés et le même encodeur de requête. Le store mémoire est le chemin intégré. |
+| `contextual-chunking` | Expérimental | [Contexte, limites et provenance](../tests/test_contextual_chunking.py), [index incrémental](../tests/test_advanced_chunking_pipeline.py), [capacités HTTP](../tests/test_server_chunking.py). | Qualifier embeddings et LLM, borner longueur, passages et coût ; vérifier la fidélité du contexte généré. Les citations gardent le texte original. Le chemin dense ne reproduit pas la recette BM25/reranking complète. |
 | `hierarchical-chunking` | Bêta | [Métadonnées hiérarchiques](../tests/test_v041_chunking_routing.py), [reconstruction parent](../tests/test_retrieval_cross_review.py). | Préserver tenant/ACL et identités parent-enfant ; contrôler les parents assemblés et les limites de contexte. |
 | `sentence-window` | Expérimental | [Fenêtre et provenance](../tests/test_v120_architecture_coverage.py), [snapshots des index](../tests/test_api_consistency_core.py). | Évaluer la segmentation dans les langues du corpus, l'expansion de contexte et la consommation mémoire ; ne pas mélanger des domaines d'autorisation dans un document. |
 | `propositional` | Expérimental | [Propositions vers parent](../tests/test_v120_architecture_coverage.py), [format du propositionizer](../tests/test_final_research_integration.py). | Fournir un LLM ou TransformersPropositionizer ; contrôler atomicité, fidélité, coût d'indexation et rappel. Un prompt générique ne reproduit pas le modèle Dense X. |

@@ -5,12 +5,14 @@ from dataclasses import dataclass
 from copy import deepcopy
 import csv
 import io
+import math
 import re
 from typing import Iterable, Sequence
 
 from ...base import Document, EmbeddingModel, _validate_top_k, _validate_non_negative_int
+from .boundaries import SentenceTextChunker, _sentence_spans
 from .recursive import RecursiveTextChunker
-from .structured import HTMLSectionChunker, MarkdownHeaderChunker, _sentence_spans
+from .structured import HTMLSectionChunker, MarkdownHeaderChunker
 
 
 def _numpy():
@@ -23,9 +25,15 @@ def _numpy():
 class SemanticChunker:
     """Split documents where adjacent sentence meaning changes.
 
-    The chunker embeds each sentence, computes adjacent cosine similarities and
-    starts a new chunk when the similarity falls below ``breakpoint_threshold``.
-    It also enforces ``max_chunk_size`` as a safety bound.
+    The chunker embeds sentence neighborhoods, computes adjacent cosine
+    similarities and cuts below ``breakpoint_threshold``. When a percentile is
+    configured, the effective cutoff is calculated from the distribution of
+    adjacent distances. Metadata records that actual cutoff.
+
+    Buffered inputs are checked against ``max_buffer_chars`` before allocation
+    and encoded in bounded batches. ``max_sentences`` bounds the number of
+    comparisons per source. Oversized sentences use source-preserving bounded
+    windows by default; explicit custom fallbacks retain their own semantics.
     """
 
     embedding_model: EmbeddingModel
@@ -33,24 +41,39 @@ class SemanticChunker:
     max_chunk_size: int = 1200
     min_chunk_size: int = 40
     min_sentences: int = 1
-    fallback_chunker: RecursiveTextChunker | None = None
+    fallback_chunker: RecursiveTextChunker | SentenceTextChunker | None = None
     buffer_size: int = 0
     breakpoint_percentile: float | None = None
+    embedding_batch_size: int = 32
+    max_buffer_chars: int = 32_000
+    max_sentences: int = 10_000
 
     def __post_init__(self) -> None:
-        if not 0 <= self.breakpoint_threshold <= 1:
+        if (
+            isinstance(self.breakpoint_threshold, bool)
+            or not isinstance(self.breakpoint_threshold, (int, float))
+            or not math.isfinite(self.breakpoint_threshold)
+            or not 0 <= self.breakpoint_threshold <= 1
+        ):
             raise ValueError("breakpoint_threshold must be between 0 and 1")
         _validate_top_k(self.max_chunk_size, name="max_chunk_size")
         _validate_top_k(self.min_sentences, name="min_sentences")
         _validate_non_negative_int(self.min_chunk_size, name="min_chunk_size")
         _validate_non_negative_int(self.buffer_size, name="buffer_size")
-        if self.breakpoint_percentile is not None and not 0 < self.breakpoint_percentile < 100:
-            raise ValueError("breakpoint_percentile must be between 0 and 100")
+        for name in ("embedding_batch_size", "max_buffer_chars", "max_sentences"):
+            _validate_top_k(getattr(self, name), name=name)
+        if self.breakpoint_percentile is not None:
+            if (
+                isinstance(self.breakpoint_percentile, bool)
+                or not isinstance(self.breakpoint_percentile, (int, float))
+                or not math.isfinite(self.breakpoint_percentile)
+                or not 0 < self.breakpoint_percentile < 100
+            ):
+                raise ValueError("breakpoint_percentile must be between 0 and 100")
         if self.fallback_chunker is None:
-            self.fallback_chunker = RecursiveTextChunker(
+            self.fallback_chunker = SentenceTextChunker(
                 chunk_size=self.max_chunk_size,
                 chunk_overlap=max(0, min(160, self.max_chunk_size // 8)),
-                min_chunk_size=self.min_chunk_size,
             )
 
     def split_documents(self, documents: Iterable[Document]) -> list[Document]:
@@ -58,105 +81,126 @@ class SemanticChunker:
         for doc in documents:
             base_id = doc.doc_id or f"doc-{len(chunks)}"
             specs = self.split_text(doc.content)
+            chunk_index = 0
             for idx, spec in enumerate(specs):
                 content = str(spec["content"]).strip()
+                semantic_metadata = {
+                    "parent_doc_id": base_id,
+                    "semantic_breakpoint_threshold": spec.get("semantic_breakpoint_threshold"),
+                    "semantic_breakpoint_percentile": self.breakpoint_percentile,
+                    "semantic_buffer_size": self.buffer_size,
+                    "sentence_start": spec.get("sentence_start"),
+                    "sentence_end": spec.get("sentence_end"),
+                    "avg_adjacent_similarity": spec.get("avg_adjacent_similarity"),
+                }
                 if len(content) > self.max_chunk_size and self.fallback_chunker is not None:
                     parent = Document(content=content, metadata=deepcopy(doc.metadata), doc_id=f"{base_id}#semantic-{idx}")
                     for fallback_doc in self.fallback_chunker.split_documents([parent]):
+                        if len(fallback_doc.content) > self.max_chunk_size:
+                            raise ValueError("SemanticChunker fallback exceeded max_chunk_size")
                         offset = int(spec["source_char_start"])
                         fallback_doc.metadata["source_char_start"] += offset
                         fallback_doc.metadata["source_char_end"] += offset
-                        fallback_doc.metadata.update(
-                            {
-                                "parent_doc_id": base_id,
-                                "chunk_method": "semantic+recursive",
-                                "semantic_breakpoint_threshold": self.breakpoint_threshold,
-                                "sentence_start": spec.get("sentence_start"),
-                                "sentence_end": spec.get("sentence_end"),
-                            }
-                        )
+                        fallback_method = fallback_doc.metadata.get("chunker", "fallback")
+                        if fallback_method == "sentence" and "normalized_char_start" in fallback_doc.metadata:
+                            fallback_doc.metadata["normalized_char_start"] += offset
+                            fallback_doc.metadata["normalized_char_end"] += offset
+                        fallback_doc.metadata.update(semantic_metadata)
+                        fallback_doc.metadata["chunk_method"] = f"semantic+{fallback_method}"
+                        fallback_doc.metadata["chunk_index"] = chunk_index
                         chunks.append(fallback_doc)
+                        chunk_index += 1
                     continue
                 chunks.append(
                     Document(
                         content=content,
                         metadata={
                             **deepcopy(doc.metadata),
-                            "chunk_index": idx,
-                            "parent_doc_id": base_id,
+                            **semantic_metadata,
+                            "chunk_index": chunk_index,
+                            "chunker": "semantic",
                             "chunk_method": "semantic",
-                            "semantic_breakpoint_threshold": self.breakpoint_threshold,
-                            "sentence_start": spec.get("sentence_start"),
-                            "sentence_end": spec.get("sentence_end"),
-                            "avg_adjacent_similarity": spec.get("avg_adjacent_similarity"),
                             "source_char_start": spec["source_char_start"],
                             "source_char_end": spec["source_char_end"],
                         },
                         doc_id=f"{base_id}#semantic-{idx}",
                     )
                 )
+                chunk_index += 1
         return chunks
 
     def split_text(self, text: str) -> list[dict[str, object]]:
-        spans = _sentence_spans(text)
+        """Return semantic spans; ``split_documents`` bounds oversized sentences."""
+        spans = _sentence_spans(text, max_spans=self.max_sentences)
         sentences = [text[start:end] for start, end in spans]
         if not sentences:
             return []
         if len(sentences) == 1:
             return [{"content": sentences[0], "sentence_start": 0, "sentence_end": 0,
-                     "source_char_start": spans[0][0], "source_char_end": spans[0][1], "avg_adjacent_similarity": None}]
+                     "source_char_start": spans[0][0], "source_char_end": spans[0][1], "avg_adjacent_similarity": None,
+                     "semantic_breakpoint_threshold": None if self.breakpoint_percentile is not None else self.breakpoint_threshold}]
 
-        buffered = [" ".join(sentences[max(0, i-self.buffer_size):i+self.buffer_size+1]) for i in range(len(sentences))]
-        embeddings = self.embedding_model.embed_documents(buffered)
         np = _numpy()
-        embeddings = np.asarray(embeddings, dtype=float)
-        if embeddings.ndim != 2 or embeddings.shape[0] != len(sentences) or embeddings.shape[1] == 0 or not np.isfinite(embeddings).all():
-            raise ValueError("SemanticChunker requires one finite embedding per buffered sentence")
+        prefix_lengths = [0]
+        for sentence in sentences:
+            prefix_lengths.append(prefix_lengths[-1] + len(sentence))
+        windows = []
+        for index in range(len(sentences)):
+            left, right = max(0, index - self.buffer_size), min(len(sentences), index + self.buffer_size + 1)
+            if prefix_lengths[right] - prefix_lengths[left] + right - left - 1 > self.max_buffer_chars:
+                raise ValueError(f"Semantic sentence neighborhood exceeds max_buffer_chars={self.max_buffer_chars}")
+            windows.append((left, right))
+        batches = []
+        dimensions = None
+        for index in range(0, len(windows), self.embedding_batch_size):
+            buffered = [" ".join(sentences[left:right]) for left, right in windows[index:index + self.embedding_batch_size]]
+            raw = np.asarray(self.embedding_model.embed_documents(buffered))
+            if (
+                raw.ndim != 2 or raw.shape[0] != len(buffered) or raw.shape[1] == 0
+                or raw.dtype.kind not in "fiu" or not np.isfinite(raw).all()
+            ):
+                raise ValueError("SemanticChunker requires one finite embedding with real numeric values per sentence")
+            with np.errstate(over="ignore", invalid="ignore"):
+                batch = np.array(raw, dtype=float, copy=True)
+            if not np.isfinite(batch).all():
+                raise ValueError("SemanticChunker requires finite embeddings representable as float64")
+            if dimensions is not None and batch.shape[1] != dimensions:
+                raise ValueError("SemanticChunker embedding dimensions changed between batches")
+            dimensions = batch.shape[1]
+            batches.append(batch)
+        embeddings = np.vstack(batches)
         similarities = _adjacent_cosine_similarities(embeddings)
         threshold = (1 - float(np.percentile(1 - similarities, self.breakpoint_percentile))
                      if self.breakpoint_percentile is not None else self.breakpoint_threshold)
         chunks: list[dict[str, object]] = []
+
+        def append(start: int, end: int) -> None:
+            chunks.append({
+                "content": text[spans[start][0]:spans[end][1]],
+                "source_char_start": spans[start][0],
+                "source_char_end": spans[end][1],
+                "sentence_start": start,
+                "sentence_end": end,
+                "avg_adjacent_similarity": _safe_mean([float(value) for value in similarities[start:end]]),
+                "semantic_breakpoint_threshold": threshold,
+            })
+
         start = 0
-        current_sentences: list[str] = []
-        current_len = 0
-        current_sims: list[float] = []
-
-        for idx, sentence in enumerate(sentences):
-            current_sentences.append(sentence)
-            current_len += len(sentence) + 1
-            if idx > start:
-                current_sims.append(float(similarities[idx - 1]))
-
-            semantic_break = idx < len(similarities) and float(similarities[idx]) < threshold
-            size_break = current_len >= self.max_chunk_size
-            enough = len(current_sentences) >= self.min_sentences and current_len >= self.min_chunk_size
-            if idx < len(sentences) - 1 and enough and (semantic_break or size_break):
-                chunks.append(
-                    {
-                        "content": text[spans[start][0]:spans[idx][1]],
-                        "source_char_start": spans[start][0],
-                        "source_char_end": spans[idx][1],
-                        "sentence_start": start,
-                        "sentence_end": idx,
-                        "avg_adjacent_similarity": _safe_mean(current_sims),
-                    }
-                )
-                start = idx + 1
-                current_sentences = []
-                current_len = 0
-                current_sims = []
-
-        if current_sentences:
-            chunks.append(
-                {
-                    "content": text[spans[start][0]:spans[-1][1]],
-                    "source_char_start": spans[start][0],
-                    "source_char_end": spans[-1][1],
-                    "sentence_start": start,
-                    "sentence_end": len(sentences) - 1,
-                    "avg_adjacent_similarity": _safe_mean(current_sims),
-                }
-            )
+        for index in range(len(sentences)):
+            # Character limits take precedence over the preferred minimums.
+            # Keep whole sentences together when possible, counting the actual
+            # source whitespace rather than a normalized sentence join.
+            if index > start and spans[index][1] - spans[start][0] > self.max_chunk_size:
+                append(start, index - 1)
+                start = index
+            current_length = spans[index][1] - spans[start][0]
+            enough = index - start + 1 >= self.min_sentences and current_length >= self.min_chunk_size
+            semantic_break = index < len(similarities) and float(similarities[index]) < threshold
+            if index < len(sentences) - 1 and (current_length >= self.max_chunk_size or (enough and semantic_break)):
+                append(start, index)
+                start = index + 1
+        if start < len(sentences):
+            append(start, len(sentences) - 1)
         return chunks
 
 

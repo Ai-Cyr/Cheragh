@@ -75,6 +75,18 @@ TECHNIQUES: tuple[TechniqueSpec, ...] = (
     _spec("naive-rag", "Naive RAG", TechniqueFamily.ORCHESTRATION, TechniqueStatus.STABLE, "cheragh.RAGEngine", "Retrieve, augment and generate with citations."),
     _spec("recursive-chunking", "Recursive chunking", TechniqueFamily.INDEXING, TechniqueStatus.STABLE, "cheragh.RecursiveTextChunker", "Recursive character-aware document splitting."),
     _spec("semantic-chunking", "Semantic chunking", TechniqueFamily.INDEXING, TechniqueStatus.BETA, "cheragh.SemanticChunker", "Embedding-guided topic boundary detection."),
+    _spec(
+        "late-chunking", "Late chunking", TechniqueFamily.INDEXING, TechniqueStatus.EXPERIMENTAL,
+        "cheragh.LateChunker", "Encode the complete document before pooling contextual token embeddings per chunk.",
+        references=("https://arxiv.org/abs/2409.04701",),
+        limitations=("Requires token states with source offsets; documents exceeding the encoder context are rejected rather than truncated. Validate the chosen model and corpus.",),
+    ),
+    _spec(
+        "contextual-chunking", "Contextual chunking", TechniqueFamily.INDEXING, TechniqueStatus.EXPERIMENTAL,
+        "cheragh.ContextualChunker", "Generate document context per passage for indexing while retaining original citation text.",
+        references=("https://www.anthropic.com/news/contextual-retrieval",),
+        limitations=("Requires an explicitly configured LLM and embeddings; generated context can be incorrect and adds indexing cost. This implements contextual dense indexing, not the complete contextual retrieval recipe.",),
+    ),
     _spec("hierarchical-chunking", "Hierarchical chunking", TechniqueFamily.INDEXING, TechniqueStatus.BETA, "cheragh.HierarchicalChunker", "Parent/child chunks with section provenance."),
     _spec("sentence-window", "Sentence-window retrieval", TechniqueFamily.INDEXING, TechniqueStatus.EXPERIMENTAL, "cheragh.SentenceWindowRetriever", "Retrieve a sentence and expand its surrounding context."),
     _spec(

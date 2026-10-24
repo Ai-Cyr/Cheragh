@@ -24,7 +24,7 @@ Cheragh est une boîte à outils Python composable pour construire, évaluer et 
 - réponses structurées avec sources, citations, avertissements et trace d'exécution ;
 - configuration YAML/JSON validée, CLI, interface graphique, serveur FastAPI et évaluation ;
 - ACL, isolation tenant/collection et cache sûr par défaut ;
-- catalogue machine-readable de 44 techniques avec statut et limites.
+- catalogue machine-readable de 46 techniques avec statut et limites.
 
 ## Installation
 
@@ -70,7 +70,7 @@ Les modèles locaux sont téléchargés à leur première utilisation. Les fourn
 ## Interface graphique
 
 L'interface web intégrée permet de poser des questions, consulter les sources,
-suivre l'index et parcourir les 44 architectures avec leurs niveaux de maturité.
+suivre l'index et parcourir les 46 architectures avec leurs niveaux de maturité.
 
 ```bash
 python -m pip install ".[fastapi,config]"
@@ -233,6 +233,8 @@ Le paramètre `top_k` suit le même contrat partout : entier strictement positif
 
 `MemoryVectorStore.save()` produit un snapshot local composé de `manifest.json`, `documents.jsonl` et `embeddings.npy`. L'indexation CLI ajoute `index_manifest.json` pour suivre les fichiers, les options de chunking et les mises à jour incrémentales.
 
+Le [guide du chunking](docs/chunking.md) présente le **semantic chunking** (ruptures de similarité et seuil percentile), le **late chunking** (encodage complet puis pooling par passage) et le **contextual chunking** (contexte documentaire généré avant embedding). Ces stratégies se configurent dans Python, YAML, la CLI et l’interface. Les modes late/contextual conservent leurs vecteurs calculés dans le store mémoire et ses snapshots.
+
 L'évaluation retrieval inclut `hit_rate@k`, `mrr`, `precision@k`, `recall@k`, `ndcg@k` et `context_precision@k`. L'évaluation de génération couvre aussi le support claim-level, les contradictions et l'alignement citation→preuve via `ClaimEvaluator`, avec un juge sémantique injectable. Les API principales sont `evaluate_retrieval(...)`, `RetrievalExample`, `evaluate_claims(...)` et `evaluate_pipeline(...)`.
 
 ## Techniques et maturité
@@ -249,7 +251,7 @@ cheragh techniques show self-rag
 | --- | --- |
 | **Stable** · 6 | RAG naïf, chunking récursif, BM25, dense, hybride, évaluation retrieval |
 | **Bêta** · 12 | chunking sémantique/hiérarchique, reranking/RRF, compression, parent-child, multi-hop, fédéré, conversationnel, SQL, ACL, évaluation génération |
-| **Expérimental** · 26 | HyDE/HyQE/RAG-Fusion, CRAG, Self-RAG, Adaptive/Agentic RAG, RAPTOR, GraphRAG-lite et Community GraphRAG, FLARE, packing long-contexte, SPLADE, ColBERT/ColPali, Temporal RAG, évaluation claim-level, entraînement retrieval-aware et autres variantes |
+| **Expérimental** · 28 | late/contextual chunking, HyDE/HyQE/RAG-Fusion, CRAG, Self-RAG, Adaptive/Agentic RAG, RAPTOR, GraphRAG-lite et Community GraphRAG, FLARE, packing long-contexte, SPLADE, ColBERT/ColPali, Temporal RAG, évaluation claim-level, entraînement retrieval-aware et autres variantes |
 
 Les nouveaux chemins de recherche sont disponibles avec leurs modèles optionnels :
 
@@ -266,7 +268,7 @@ Ces implémentations ont des tests de mécanismes, d’intégration et d’appre
 
 Voir les [recettes et dépendances](docs/research_recipes.md), l’[audit des 44 techniques](docs/sota_implementation_audit.md), la [matrice de fidélité](docs/research_fidelity.md) et les [résultats de vérification](docs/research_validation.md). Les API historiques restent disponibles ; la maturité n’est pas promue automatiquement par ces ajouts.
 
-La [matrice de qualification production](docs/architecture_production_matrix.md) relie les 44 techniques à leurs tests, préconditions de déploiement et limites. Elle couvre aussi les compositions, l'autorisation des preuves dérivées et les contrôles à effectuer avec les modèles et la charge réellement déployés.
+La [matrice de qualification production](docs/architecture_production_matrix.md) relie les 46 techniques à leurs tests, préconditions de déploiement et limites. Elle couvre aussi les compositions, l'autorisation des preuves dérivées et les contrôles à effectuer avec les modèles et la charge réellement déployés.
 
 ## Sécurité et production
 
