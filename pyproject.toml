@@ -40,6 +40,7 @@ anthropic = ["anthropic>=0.25,<2"]
 litellm = ["litellm>=1.0,<2"]
 rerank = ["sentence-transformers>=2.2,<7"]
 learned-retrieval = ["sentence-transformers>=5.0,<7", "transformers>=4.46,<6", "torch>=2.6,<3"]
+late-chunking = ["transformers>=4.46,<6", "torch>=2.6,<3"]
 evaluation-semantic = ["transformers>=4.46,<6", "torch>=2.6,<3"]
 self-rag = ["transformers>=4.46,<6", "torch>=2.6,<3", "sentencepiece>=0.2,<1"]
 research = ["transformers>=4.46,<6", "torch>=2.6,<3", "sentencepiece>=0.2,<1"]
@@ -119,6 +120,10 @@ files = [
   "src/cheragh/adaptive.py",
   "src/cheragh/adaptive_learning.py",
   "src/cheragh/long_rag.py",
+  "src/cheragh/ingestion/chunkers/boundaries.py",
+  "src/cheragh/ingestion/chunkers/contextual.py",
+  "src/cheragh/ingestion/chunkers/late.py",
+  "src/cheragh/ingestion/chunkers/registry.py",
   "src/cheragh/evaluation/semantic.py",
   "src/cheragh/agentic",
   "src/cheragh/catalog",

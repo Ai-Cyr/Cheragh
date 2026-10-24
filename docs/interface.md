@@ -75,7 +75,12 @@ cheragh ui --index /srv/cheragh/index \
 ```
 
 Dans **Documents**, les chemins sont relatifs au répertoire autorisé du serveur.
-Le formulaire accepte les paramètres de découpage et l'indexation incrémentale.
+Le formulaire propose le découpage récursif, par phrases, paragraphes ou tokens,
+ainsi que le semantic, late et contextual chunking. Les méthodes avancées
+utilisent exclusivement les modèles déjà configurés sur le serveur ; un choix
+indisponible explique le prérequis manquant. Le mode sémantique expose aussi la
+fenêtre de phrases et le seuil percentile. Voir le [guide du chunking](chunking.md)
+pour les capacités des modèles, les limites et l'indexation incrémentale.
 Il ne téléverse pas les fichiers de l'ordinateur depuis lequel vous consultez
 l'interface.
 

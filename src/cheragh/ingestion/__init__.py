@@ -1,6 +1,10 @@
 """Ingestion utilities for standard Python RAG projects."""
 from .pipeline import load_documents, ingest_path
 from .chunkers import (
+    CHUNKING_STRATEGIES,
+    build_chunker,
+    list_chunking_strategies,
+    validate_chunking_options,
     RecursiveTextChunker,
     TextChunk,
     TokenTextChunker,
@@ -8,6 +12,11 @@ from .chunkers import (
     HTMLSectionChunker,
     SentenceWindowChunker,
     SemanticChunker,
+    SentenceTextChunker,
+    ParagraphChunker,
+    LateChunker,
+    ContextualChunker,
+    TransformersTokenEmbedding,
     CodeChunker,
     TableChunker,
     PDFLayoutChunker,
@@ -17,6 +26,15 @@ from .chunkers import (
 from .loaders import load_text_file, load_html_file, load_pdf_file, load_docx_file
 
 __all__ = [
+    "SentenceTextChunker",
+    "ParagraphChunker",
+    "LateChunker",
+    "ContextualChunker",
+    "TransformersTokenEmbedding",
+    "CHUNKING_STRATEGIES",
+    "build_chunker",
+    "list_chunking_strategies",
+    "validate_chunking_options",
     "load_documents",
     "ingest_path",
     "RecursiveTextChunker",

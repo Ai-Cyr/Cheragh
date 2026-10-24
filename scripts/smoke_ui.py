@@ -131,15 +131,31 @@ def exercise(base_url: str, corpus: Path, key: str, *, browser_executable: str |
             page.get_by_label("Maturité", exact=True).select_option("all")
 
             # Rebuild and activate the served index without restarting the server.
-            corpus.write_text("The deployment code is coral-garden.", encoding="utf-8")
+            corpus.write_text(
+                "The deployment code is coral-garden.\n\n"
+                "Releases are checked before deployment.", encoding="utf-8",
+            )
             page.get_by_role("button", name="Documents", exact=True).click()
             page.get_by_label("Chemin des documents", exact=True).fill("corpus.txt")
             expect(page.get_by_label("Dossier de l’index", exact=True)).to_have_value("index")
+            chunking = page.get_by_label("Technique de découpage", exact=True)
+            expect(chunking).to_have_value("recursive")
+            for strategy in ("semantic", "late", "contextual"):
+                expect(chunking.locator(f'option[value="{strategy}"]')).to_have_attribute("disabled", "")
+            expect(page.locator("#chunking-capabilities")).to_contain_text("Configurez")
+            chunking.select_option("token")
+            expect(page.locator("#chunk-size-unit")).to_contain_text("mots")
+            chunking.select_option("paragraph")
+            expect(page.locator("#chunk-size-unit")).to_contain_text("caractères")
+            page.get_by_label("Taille des fragments", exact=True).fill("50")
+            page.get_by_label("Chevauchement", exact=True).fill("0")
             page.get_by_label("Activer cet index après l’indexation", exact=True).check()
             with page.expect_response(lambda response: response.url.endswith("/index")) as indexed:
                 page.get_by_role("button", name="Indexer les documents").click()
             assert indexed.value.ok, "Document indexing failed"
+            assert indexed.value.request.post_data_json["chunking_strategy"] == "paragraph"
             assert indexed.value.json().get("activated") is True, "New index was not activated"
+            assert indexed.value.json()["indexed_documents"] == 2, "Paragraph boundaries were not applied"
             page.get_by_role("button", name="Conversation", exact=True).click()
             question.fill("What is the deployment code?")
             page.get_by_role("button", name="Envoyer la question", exact=True).click()

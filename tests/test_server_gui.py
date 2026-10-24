@@ -96,7 +96,7 @@ def test_ui_settings_and_catalogue_share_api_authentication_and_hide_absolute_pa
         assert settings.json()["default_top_k"] == 3
         assert settings.json()["auth_required"] is True
         catalogue = client.get("/ui/api/techniques", headers=AUTH).json()
-        assert len(catalogue) == 44
+        assert len(catalogue) == 46
         assert {item["status"] for item in catalogue} >= {"stable", "beta", "experimental"}
 
 

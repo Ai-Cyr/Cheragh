@@ -929,7 +929,8 @@ fieldset {
   margin: 0;
   min-width: 0;
 }
-.form-card input {
+.form-card input,
+.form-card select {
   font-size: 12px;
 }
 .form-grid {
@@ -1568,7 +1569,8 @@ fieldset {
   .form-card label {
     font-size: 11px;
   }
-  .form-card input {
+  .form-card input,
+  .form-card select {
     font-size: 11px;
   }
   .document-guide h2 {

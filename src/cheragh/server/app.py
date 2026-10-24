@@ -14,15 +14,18 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .. import __version__
-from ..base import EmbeddingModel, HashingEmbedding, _validate_top_k
+from ..base import EmbeddingModel, ExtractiveLLMClient, HashingEmbedding, StaticLLMClient, _validate_top_k
+from ..cache.decorators import CachedLLMClient
 from ..engine import RAGEngine
-from ..vectorstores.memory import MemoryVectorStore
+from ..ingestion.chunkers import CHUNKING_STRATEGIES, list_chunking_strategies, validate_chunking_options
+from ..vectorstores.memory import MemoryVectorStore, _unwrap_embedding_model
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -49,11 +52,23 @@ class IndexRequest(BaseModel):
     activate: bool = False
     chunk_size: int = Field(default=800, ge=1, le=100_000)
     chunk_overlap: int = Field(default=120, ge=0, le=100_000)
+    chunking_strategy: str = Field(
+        default="recursive", json_schema_extra={"enum": list(CHUNKING_STRATEGIES)},
+    )
+    chunking_options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("chunking_strategy")
+    @classmethod
+    def validate_chunking_strategy(cls, value: str) -> str:
+        if value not in CHUNKING_STRATEGIES:
+            raise ValueError("Unsupported chunking strategy")
+        return value
 
     @model_validator(mode="after")
     def validate_chunk_window(self) -> IndexRequest:
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size")
+        self.chunking_options = validate_chunking_options(self.chunking_strategy, self.chunking_options)
         return self
 
 
@@ -432,6 +447,50 @@ def create_app(
         raise TypeError("engine must provide callable ask() and stream() methods")
     default_top_k = min(_validate_top_k(getattr(engine, "top_k", max_top_k)), max_top_k)
 
+    # Share the source store's embedding lock when reusing its configured model
+    # for indexing. A new store has its own lock, which cannot protect concurrent
+    # queries still using this same provider instance.
+    indexing_store = getattr(getattr(engine, "retriever", None), "store", None)
+    if not isinstance(indexing_store, MemoryVectorStore):
+        indexing_store = None
+    indexing_lock = getattr(indexing_store, "_embedding_lock", None)
+    indexing_embedder = (
+        serving_embedding or getattr(indexing_store, "embedding_model", None)
+        if indexing_lock is not None else None
+    )
+    indexing_llm = getattr(engine, "llm_client", None)
+    generation_client = indexing_llm
+    seen_clients: set[int] = set()
+    while isinstance(generation_client, CachedLLMClient):
+        if id(generation_client) in seen_clients:
+            generation_client = None
+            break
+        seen_clients.add(id(generation_client))
+        generation_client = generation_client.client
+
+    def chunking_availability(strategy: str) -> tuple[bool, str]:
+        if strategy not in {"semantic", "late", "contextual"}:
+            return True, ""
+        if indexing_embedder is None:
+            return False, "Nécessite un MemoryVectorStore direct avec son modèle d’embedding configuré."
+        if strategy == "semantic" and isinstance(_unwrap_embedding_model(indexing_embedder), HashingEmbedding):
+            return False, "Configurez un modèle d’embedding sémantique ; HashingEmbedding n’est pas adapté."
+        if strategy == "late" and not callable(getattr(_unwrap_embedding_model(indexing_embedder), "encode_tokens", None)):
+            return False, "Configurez un encodeur de tokens contextualisés compatible avec le late chunking."
+        if strategy == "contextual" and (
+            not callable(getattr(generation_client, "generate", None))
+            or isinstance(generation_client, (ExtractiveLLMClient, StaticLLMClient))
+        ):
+            return False, "Configurez un modèle de génération pour contextualiser les fragments."
+        return True, ""
+
+    def available_chunking_strategies() -> list[dict[str, Any]]:
+        descriptions: list[dict[str, Any]] = []
+        for strategy in list_chunking_strategies():
+            available, reason = chunking_availability(strategy["id"])
+            descriptions.append({**strategy, "available": available, "reason": reason})
+        return descriptions
+
     operation_limiter = _OperationLimiter(max_concurrent_operations)
     index_write_lock = threading.Lock()
     app = FastAPI(title="cheragh", version=__version__)
@@ -467,6 +526,7 @@ def create_app(
         "index_timeout_seconds": index_timeout_seconds,
         "can_activate_index": indexing_enabled and index_output is not None,
         "index_output": index_output,
+        "chunking_strategies": available_chunking_strategies(),
     })
 
     class ManagedStreamingResponse(StreamingResponse):
@@ -589,6 +649,9 @@ def create_app(
 
         if request.activate and (index_output is None or output_path != serving_index):
             raise HTTPException(status_code=400, detail="Activation requires the server's configured local index")
+        available, reason = chunking_availability(request.chunking_strategy)
+        if not available:
+            raise HTTPException(status_code=400, detail=reason)
         if not index_write_lock.acquire(blocking=False):
             raise HTTPException(status_code=503, detail="Indexing is already running", headers={"Retry-After": "1"})
 
@@ -600,21 +663,26 @@ def create_app(
         def build_snapshot() -> tuple[dict[str, Any], RAGEngine | None]:
             worker_started.set()
             try:
-                if abandoned.is_set():
-                    raise _OperationTimeoutError("index operation abandoned before worker start")
-                options: dict[str, Any] = {
-                    "chunk_size": request.chunk_size,
-                    "chunk_overlap": request.chunk_overlap,
-                    "incremental": request.incremental,
-                }
-                if request.activate:
-                    options["embedding_model"] = serving_embedding
-                result = build_index(input_path, output_path, **options)
-                candidate = (
-                    RAGEngine(MemoryVectorStore.load(output_path, serving_embedding).as_retriever())
-                    if request.activate else None
-                )
-                return result, candidate
+                with indexing_lock if indexing_lock is not None else nullcontext():
+                    if abandoned.is_set():
+                        raise _OperationTimeoutError("index operation abandoned before worker start")
+                    options: dict[str, Any] = {
+                        "chunk_size": request.chunk_size,
+                        "chunk_overlap": request.chunk_overlap,
+                        "chunking_strategy": request.chunking_strategy,
+                        "chunking_options": request.chunking_options,
+                        "incremental": request.incremental,
+                    }
+                    if indexing_embedder is not None:
+                        options["embedding_model"] = indexing_embedder
+                    if request.chunking_strategy == "contextual":
+                        options["llm_client"] = indexing_llm
+                    result = build_index(input_path, output_path, **options)
+                    candidate = (
+                        RAGEngine(MemoryVectorStore.load(output_path, serving_embedding).as_retriever())
+                        if request.activate else None
+                    )
+                    return result, candidate
             finally:
                 worker_finished.set()
                 if abandoned.is_set():

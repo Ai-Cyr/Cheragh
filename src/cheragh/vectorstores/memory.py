@@ -65,18 +65,47 @@ class MemoryVectorStore:
             return
         with self._embedding_lock:
             new_embeddings = np.asarray(self.embedding_model.embed_documents([doc.content for doc in new_docs]))
+        self._append_embeddings(new_docs, new_embeddings, model_output=True)
+
+    def add_embeddings(self, documents: Iterable[Document], embeddings: Any) -> None:
+        """Append documents with precomputed vectors without re-embedding them.
+
+        ``embeddings`` must be a finite, real numeric matrix of shape
+        ``(len(documents), dimension)``. Its dimension must match both the query
+        embedding model, when declared, and the store's established dimension.
+        The caller is responsible for using the same embedding space as the
+        query model; matching dimensions alone cannot establish compatibility.
+
+        Documents, nested metadata and vectors are copied before publication.
+        Equal document text is not deduplicated: contextual embeddings from
+        different source documents remain distinct. Empty batches still require
+        a valid ``(0, dimension)`` matrix with a positive dimension; they leave
+        the store unchanged and do not establish a new dimension.
+        """
+        materialized = list(documents)
+        for index, document in enumerate(materialized):
+            _validate_document(document, label=f"documents[{index}]")
+        new_docs = _snapshot_documents(materialized)
+        self._append_embeddings(new_docs, embeddings, model_output=False)
+
+    def _append_embeddings(self, new_docs: list[Document], embeddings: Any, *, model_output: bool) -> None:
+        """Validate owned documents and publish an independent vector snapshot."""
+        np = _numpy()
+        new_embeddings = np.asarray(embeddings)
         if (
             new_embeddings.ndim != 2
             or new_embeddings.shape[0] != len(new_docs)
             or new_embeddings.shape[1] == 0
         ):
+            prefix = "Embedding model returned an invalid matrix" if model_output else "Invalid precomputed embedding matrix"
             raise ValueError(
-                "Embedding model returned an invalid matrix: expected "
+                f"{prefix}: expected "
                 f"({len(new_docs)}, dimension), got {new_embeddings.shape}"
             )
-        _validate_finite_embeddings(new_embeddings, label="embedding model output")
+        label = "embedding model output" if model_output else "precomputed embeddings"
+        _validate_finite_embeddings(new_embeddings, label=label)
         new_embeddings = new_embeddings.astype(float, copy=True)
-        _validate_finite_embeddings(new_embeddings, label="embedding model output")
+        _validate_finite_embeddings(new_embeddings, label=label)
         expected_dimension = _known_embedding_dimension(self.embedding_model)
         if expected_dimension is not None and new_embeddings.shape[1] != expected_dimension:
             raise ValueError(
@@ -87,13 +116,15 @@ class MemoryVectorStore:
             current_embeddings = self.embeddings
             if (
                 current_embeddings is not None
-                and len(current_embeddings)
+                and current_embeddings.shape[1]
                 and current_embeddings.shape[1] != new_embeddings.shape[1]
             ):
                 raise ValueError(
                     "Embedding dimension mismatch: "
                     f"store contains {current_embeddings.shape[1]}, got {new_embeddings.shape[1]}"
                 )
+            if not new_docs:
+                return
             # Publish documents and vectors together under the data lock. New
             # containers keep snapshots already held by readers immutable.
             if current_embeddings is None or len(current_embeddings) == 0:

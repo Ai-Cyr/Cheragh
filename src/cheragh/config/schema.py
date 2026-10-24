@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+from ..ingestion.chunkers import CHUNKING_STRATEGIES, validate_chunking_options
+
 try:
     from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 except ImportError as exc:  # pragma: no cover - dependency guard
@@ -26,6 +28,7 @@ _EMBEDDING_PROVIDERS = {
     "local-hash",
     "sentence-transformers",
     "sentence-transformer",
+    "transformers-token",
     "openai",
     "azure-openai",
     "azure",
@@ -87,14 +90,24 @@ def _validated_choice(value: str, *, supported: set[str], label: str) -> str:
 
 class IngestionConfig(StrictBaseModel):
     path: str | None = None
+    chunking_strategy: str = "recursive"
+    chunking_options: dict[str, Any] = Field(default_factory=dict)
     chunk_size: int = Field(default=800, ge=1, le=1_000_000)
     chunk_overlap: int = Field(default=120, ge=0, le=1_000_000)
     recursive: bool = True
     max_file_size_mb: float | None = Field(default=None, gt=0)
     exclude_patterns: list[str] = Field(default_factory=list)
 
+    @field_validator("chunking_strategy")
+    @classmethod
+    def validate_chunking_strategy(cls, value: str) -> str:
+        if value not in CHUNKING_STRATEGIES:
+            raise ValueError("ingestion.chunking_strategy must be one of: " + ", ".join(CHUNKING_STRATEGIES))
+        return value
+
     @model_validator(mode="after")
     def validate_overlap(self) -> "IngestionConfig":
+        self.chunking_options = validate_chunking_options(self.chunking_strategy, self.chunking_options)
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("ingestion.chunk_overlap must be smaller than ingestion.chunk_size")
         return self
@@ -104,6 +117,9 @@ class EmbeddingConfig(StrictBaseModel):
     provider: str = "hashing"
     model: str | None = None
     dimension: int = Field(default=384, ge=1, le=100_000)
+    revision: str | None = Field(default=None, min_length=1, max_length=256)
+    device: str = Field(default="cpu", min_length=1, max_length=64)
+    max_tokens: int = Field(default=512, ge=1, le=1_000_000)
     api_key: str | None = None
     azure_endpoint: str | None = None
     api_version: str | None = None
@@ -121,6 +137,8 @@ class EmbeddingConfig(StrictBaseModel):
             raise ValueError("embedding.model is required for the Azure OpenAI provider")
         if self.provider == "cohere" and self.max_retries is not None:
             raise ValueError("embedding.max_retries is not supported by the Cohere client")
+        if self.provider == "transformers-token" and self.model is not None and not self.model:
+            raise ValueError("embedding.model must be a non-empty name for transformers-token")
         return self
 
 
@@ -444,6 +462,15 @@ class RAGConfig(StrictBaseModel):
             raise ValueError(
                 "retriever.type and vectorstore.type conflict; configure one selector or use matching values"
             )
+        strategy = self.ingestion.chunking_strategy
+        if strategy == "semantic" and self.embedding.provider in {"hashing", "local-hash"}:
+            raise ValueError("Semantic chunking requires a semantic embedding provider, not hashing")
+        if strategy == "late" and self.embedding.provider != "transformers-token":
+            raise ValueError("Late chunking requires embedding.provider: transformers-token")
+        if strategy == "contextual" and self.generation.provider in {"extractive", "none", "local"}:
+            raise ValueError("Contextual chunking requires a generative LLM provider")
+        if strategy in {"late", "contextual"} and (vector_type or retriever_type) not in {"memory", "vector"}:
+            raise ValueError("Late/contextual chunking requires retriever.type or vectorstore.type: memory or vector")
         return self
 
     def to_legacy_dict(self) -> dict[str, Any]:

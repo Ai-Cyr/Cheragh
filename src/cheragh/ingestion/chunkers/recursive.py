@@ -160,10 +160,14 @@ def chunk_documents(
     documents: Iterable[Document],
     chunk_size: int = 800,
     chunk_overlap: int = 120,
+    *,
+    chunking_strategy: str = "recursive",
     **kwargs,
 ) -> list[Document]:
-    """Convenience wrapper around :class:`RecursiveTextChunker`."""
-    return RecursiveTextChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs).split_documents(documents)
+    """Split documents with a configured strategy (recursive by default)."""
+    from .registry import build_chunker
+
+    return build_chunker(chunking_strategy, chunk_size, chunk_overlap, **kwargs).split_documents(documents)
 
 
 def _normalize_whitespace(text: str) -> str:

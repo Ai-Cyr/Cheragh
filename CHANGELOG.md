@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add genuine late chunking with whole-document contextual token encoding, source-aligned pooling, query-compatible embeddings and explicit rejection of model context overflow.
+- Add contextual chunking with bounded LLM context generation, original-source citations and preserved contextual vectors.
+- Extend semantic chunking with bounded sentence-context batches, adaptive percentile thresholds and exact-source fallback spans.
+- Share chunking strategy selection across Python, YAML, CLI and the web interface; validate model capabilities and incremental fingerprints, including contextual generation changes.
+- Add optional `late-chunking` dependencies and expand the catalogue to 46 techniques, retaining experimental status for late/contextual methods.
+
 - Add a packaged French web interface at `/ui/` and a `cheragh ui` CLI alias, with authenticated conversations, source inspection, index operations and a searchable architecture catalogue.
 - Permit explicit activation of the current local index after successful indexing, preserving in-flight requests and refusing late activation after timeout or cancellation.
 - Exercise the installed interface in Chromium, including authentication, source rendering, index activation, reverse-proxy paths, session clearing and mobile layouts.

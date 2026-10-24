@@ -195,6 +195,9 @@
     $("index-path").value = "";
     $("index-output").value = ".cheragh_index";
     $("index-output").readOnly = false;
+    $("semantic-buffer").value = "0";
+    $("semantic-percentile").value = "";
+    populateChunkingStrategies();
     $("index-result").hidden = true;
     $("index-result").replaceChildren();
     $("document-count").textContent = "—";
@@ -244,7 +247,80 @@
     $("index-activate").checked = Boolean(settings.can_activate_index);
     if (settings.index_output)
       $("index-output").value = String(settings.index_output);
+    populateChunkingStrategies();
     updateActivation();
+  }
+
+  function populateChunkingStrategies() {
+    const options = Array.isArray(state.settings?.chunking_strategies)
+      ? state.settings.chunking_strategies.filter(
+          (strategy) =>
+            strategy &&
+            typeof strategy.id === "string" &&
+            typeof strategy.label === "string",
+        )
+      : [];
+    const select = $("chunking-strategy");
+    select.replaceChildren();
+    const capabilities = $("chunking-capabilities");
+    capabilities.replaceChildren();
+    for (const strategy of options) {
+      const option = element("option", "", strategy.label);
+      option.value = strategy.id;
+      option.disabled = strategy.available === false;
+      if (option.disabled) {
+        option.textContent = `${strategy.label} — configuration requise`;
+        capabilities.append(
+          element(
+            "li",
+            "",
+            `${strategy.label} : ${strategy.reason || "Un modèle compatible doit être configuré sur le serveur."}`,
+          ),
+        );
+      }
+      select.append(option);
+    }
+    capabilities.hidden = !capabilities.childElementCount;
+    // Older servers support recursive splitting only; do not advertise unavailable methods.
+    if (!options.length) {
+      const option = element("option", "", "Récursif");
+      option.value = "recursive";
+      select.append(option);
+    }
+    select.value = "recursive";
+    if (!select.value) select.selectedIndex = 0;
+    updateChunkingDescription();
+  }
+
+  function updateChunkingDescription() {
+    const strategies = state.settings?.chunking_strategies;
+    const strategy = Array.isArray(strategies)
+      ? strategies.find((item) => item?.id === $("chunking-strategy").value)
+      : null;
+    $("chunking-help").textContent =
+      strategy?.description ||
+      "Privilégie les paragraphes et les phrases dans la limite choisie.";
+    const units = {
+      tokens: [
+        "En mots séparés par des espaces, une approximation des tokens de modèle.",
+        "En mots, inférieur à la taille du fragment.",
+      ],
+      model_tokens: [
+        "En tokens du modèle configuré.",
+        "En tokens du modèle, inférieur à la taille du fragment.",
+      ],
+      characters: [
+        "En caractères.",
+        "En caractères, inférieur à la taille du fragment.",
+      ],
+    };
+    const unit = units[strategy?.unit] || units.characters;
+    $("chunk-size-unit").textContent = unit[0];
+    $("chunk-overlap-unit").textContent = unit[1];
+    const semantic = strategy?.id === "semantic";
+    $("semantic-options").hidden = !semantic;
+    $("semantic-buffer").disabled = !semantic;
+    $("semantic-percentile").disabled = !semantic;
   }
 
   function updateActivation() {
@@ -555,6 +631,17 @@
         state.settings.can_activate_index && $("index-activate").checked,
       ),
     };
+    if (Array.isArray(state.settings.chunking_strategies))
+      body.chunking_strategy = $("chunking-strategy").value;
+    if (body.chunking_strategy === "semantic") {
+      body.chunking_options = {
+        buffer_size: Number($("semantic-buffer").value),
+      };
+      if ($("semantic-percentile").value !== "")
+        body.chunking_options.breakpoint_percentile = Number(
+          $("semantic-percentile").value,
+        );
+    }
     if (!body.path || !body.output) {
       toast("Indiquez les chemins des documents et de l’index.", true);
       return;
@@ -751,6 +838,7 @@
   $("refresh-button").addEventListener("click", () => refreshStatus());
   $("index-form").addEventListener("submit", indexDocuments);
   $("index-activate").addEventListener("change", updateActivation);
+  $("chunking-strategy").addEventListener("change", updateChunkingDescription);
   $("chunk-overlap").addEventListener("input", () =>
     $("chunk-overlap").setCustomValidity(""),
   );

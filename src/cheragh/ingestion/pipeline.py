@@ -4,10 +4,10 @@ from __future__ import annotations
 from fnmatch import fnmatch
 import math
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
-from ..base import Document
-from .chunkers import chunk_documents
+from ..base import Document, EmbeddingModel, LLMClient
+from .chunkers import build_chunker, validate_chunking_options
 from .loaders.docx import load_docx_file
 from .loaders.pdf import load_pdf_file
 from .loaders.text import load_html_file, load_text_file, supports_html, supports_text
@@ -101,11 +101,31 @@ def ingest_path(
     recursive: bool = True,
     chunk_size: int = 800,
     chunk_overlap: int = 120,
+    *,
+    chunking_strategy: str = "recursive",
+    chunking_options: dict[str, Any] | None = None,
+    embedding_model: EmbeddingModel | None = None,
+    llm_client: LLMClient | None = None,
     **loader_kwargs,
 ) -> list[Document]:
-    """Load then chunk a path in one call."""
+    """Load and split source documents with the selected strategy.
+
+    Semantic splitting requires an explicit embedding model. Late/contextual
+    strategies also produce vectors and must use ``index_path``, ``RAGEngine``
+    or ``chunk_and_embed`` instead so those vectors are preserved.
+    """
+    validate_chunking_options(chunking_strategy, chunking_options)
+    if chunking_strategy in {"late", "contextual"}:
+        raise ValueError(
+            "Late/contextual ingestion produces document vectors; use index_path, "
+            "RAGEngine.from_path or chunk_and_embed() to preserve them"
+        )
+    chunker = build_chunker(
+        chunking_strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        embedding_model=embedding_model, llm_client=llm_client, chunking_options=chunking_options,
+    )
     docs = load_documents(path, recursive=recursive, **loader_kwargs)
-    return chunk_documents(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    return chunker.split_documents(docs)
 
 
 def _iter_candidate_files(

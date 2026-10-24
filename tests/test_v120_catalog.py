@@ -21,7 +21,7 @@ from cheragh.config import validate_config
 
 class ArchitectureCatalogueTests(unittest.TestCase):
     def test_every_catalogue_entry_is_available_and_public(self) -> None:
-        self.assertEqual(len(TECHNIQUES), 44)
+        self.assertEqual(len(TECHNIQUES), 46)
         self.assertEqual(list_techniques(status=TechniqueStatus.PLANNED), [])
 
         for technique in TECHNIQUES:
@@ -75,7 +75,7 @@ class ArchitectureCatalogueTests(unittest.TestCase):
 
         self.assertEqual(counts[TechniqueStatus.STABLE], 6)
         self.assertEqual(counts[TechniqueStatus.BETA], 12)
-        self.assertEqual(counts[TechniqueStatus.EXPERIMENTAL], 26)
+        self.assertEqual(counts[TechniqueStatus.EXPERIMENTAL], 28)
         self.assertEqual(counts[TechniqueStatus.PLANNED], 0)
         self.assertEqual(cheragh.__version__, "1.4.0")
 
