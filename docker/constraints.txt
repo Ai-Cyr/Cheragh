@@ -2,8 +2,8 @@
 # The default fastapi,config image installs that complete hash-checked lock.
 # Custom CHERAGH_EXTRAS use these constraints and resolve other dependencies.
 numpy==2.5.2
-pydantic==2.14.0
+pydantic==2.14.1
 PyYAML==6.0.3
-fastapi==0.143.0
+fastapi==0.161.1
 uvicorn==0.54.0
-qdrant-client==1.19.1
+qdrant-client==1.20.0
